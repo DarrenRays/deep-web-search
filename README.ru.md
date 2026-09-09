@@ -54,9 +54,11 @@ docker compose up -d          # searxng и crawl4ai
 
 ```bash
 ./scripts/install-skills.sh
-export INTERNET_CLAUDE_DIR="$PWD"     # добавить в ~/.zshrc или ~/.bashrc
 uv sync                               # venv, в который скилл делает re-exec
 ```
+
+Скилл находит `lib/`, `.venv` и `.env` сам: резолвит собственный путь обратно в
+чекаут, вместе с симлинком. Переменную пути задавать не нужно.
 
 Это всё, что нужно: два контейнера, один venv, один симлинк.
 
@@ -132,8 +134,8 @@ uv sync                               # venv, в который скилл де�
 |---|---|
 | `CRAWL4AI_API_TOKEN` | обязательна: Crawl4AI требует её на каждом эндпоинте |
 | `SEARXNG_PORT`, `CRAWL4AI_PORT` | порты на хосте, только на `127.0.0.1` |
-| `INTERNET_CLAUDE_DIR` | путь к этому чекауту, по умолчанию `~/internet-claude` |
 | `TAVILY_API_KEY_1..3`, `JINA_API_KEY` | ветка `tavily+jina` |
+| `DEEP_SEARCH_DIR` | путь к чекауту; нужен, только если скилл скопировали из него, а не слинковали |
 | `DEEP_SEARCH_PROXY` | прокси для внешних запросов, по умолчанию `http://127.0.0.1:8118`, пустое значение = напрямую |
 | `DEEP_SEARCH_SEARXNG_URL`, `DEEP_SEARCH_CRAWL4AI_URL` | полные URL, если сервисы не на локальных портах по умолчанию |
 | `SOCIAL_*`, `BLUESKY_*`, `YOUTUBE_API_KEY` | опциональные соц-источники, см. `.env.example` |

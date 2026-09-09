@@ -14,7 +14,7 @@ One query goes to two independent stacks at once; the results are merged by URL:
 | `searxng+crawl4ai` | self-hosted SearXNG `127.0.0.1:8880` + Crawl4AI `127.0.0.1:11235` over plain HTTP | free, no rate limit |
 
 The skill imports the stack's modules (`backends.py`, `sanitize.py`,
-`sources.py`, `aggregate.py`, `social.py`) from `INTERNET_CLAUDE_DIR/lib` and
+`sources.py`, `aggregate.py`, `social.py`) from the checkout's `lib/` and
 calls the services itself. Nothing is loaded into context until the skill is
 called.
 
@@ -135,7 +135,7 @@ keeps working, and the exit code stays `0`. An empty list is never printed as
 | Message | What to do |
 |---|---|
 | `tavily+jina — ERROR: No TAVILY_API_KEY_1..3 variables found` | the keys are not in the process environment; configure them outside the chat |
-| `searxng+crawl4ai — нет каталога …/lib` | set `INTERNET_CLAUDE_DIR` |
+| `searxng+crawl4ai — нет каталога …/lib` | the skill was copied out of its checkout; set `DEEP_SEARCH_DIR` |
 | `searxng+crawl4ai — httpx недоступен` | run `uv sync` in the stack directory |
 | `searxng+crawl4ai — CRAWL4AI_API_TOKEN не задан` | add the token to the environment or to `<repo>/.env` |
 | `searxng+crawl4ai — SearXNG вернул 0 результатов; движки: …` | rare with `--engines auto`: a pool of 52 engines survives a CAPTCHA on the main four. If it is still zero — wait, or use `--engines builtin` |
@@ -204,7 +204,7 @@ back to back: a burst of queries makes the SearXNG engines serve CAPTCHAs.
 | `DEEP_SEARCH_PROXY` | proxy for external requests, `http://127.0.0.1:8118` by default; an empty value means direct |
 | `TAVILY_API_KEY_1..3`, `JINA_API_KEY` | branch `tavily+jina` (read by `tavily_jina.py` itself) |
 | `CRAWL4AI_API_TOKEN` | branch `searxng+crawl4ai`; falls back to `<repo>/.env` |
-| `INTERNET_CLAUDE_DIR` | path to the stack, `~/internet-claude` by default |
+| `DEEP_SEARCH_DIR` | path to the checkout; only needed when the skill was copied rather than symlinked out of it |
 | `SEARXNG_PORT`, `CRAWL4AI_PORT` | localhost ports, `8880` / `11235` by default |
 | `DEEP_SEARCH_SEARXNG_URL`, `DEEP_SEARCH_CRAWL4AI_URL` | full address override |
 

@@ -24,7 +24,7 @@ by `scripts/install-skills.sh`.
 
 | Path | Holds |
 |---|---|
-| `skills/deep-search/scripts/deep_search.py` | both branches, merge, tiered report; imports `lib/` from `INTERNET_CLAUDE_DIR` |
+| `skills/deep-search/scripts/deep_search.py` | both branches, merge, tiered report; finds `lib/`, `.venv` and `.env` from its own path |
 | `skills/deep-search/scripts/tavily_jina.py` | branch `tavily+jina`, run as a subprocess by the skill |
 | `skills/deep-search/tests/e2e.sh` | 18 scenarios against a stub SearXNG; `DEEP_SEARCH_SCRIPT` points it at a checkout |
 

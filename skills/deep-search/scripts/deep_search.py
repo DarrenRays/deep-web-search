@@ -3,8 +3,8 @@
 
 Nothing reaches the model context until this skill is called. Branch A shells
 out to tavily_jina.py next to this file; branch B imports the stack's own
-modules from INTERNET_CLAUDE_DIR/lib instead of restating its HTTP contracts,
-which also keeps the SSRF vetting in sanitize.py on the path.
+modules from the checkout's lib/ instead of restating its HTTP contracts, which
+also keeps the SSRF vetting in sanitize.py on the path.
 """
 
 from __future__ import annotations
@@ -23,7 +23,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import urlsplit
 
-DEFAULT_REPO = "~/internet-claude"
 BOOTSTRAP_FLAG = "DEEP_SEARCH_BOOTSTRAPPED"
 TAVILY_SCRIPT = "tavily_jina.py"
 TAVILY_TIMEOUT = 180
@@ -72,7 +71,17 @@ class Entry:
 
 
 def repo_dir() -> Path:
-    return Path(os.environ.get("INTERNET_CLAUDE_DIR", DEFAULT_REPO)).expanduser()
+    """Where lib/, .venv and .env live.
+
+    The skill sits at <repo>/skills/deep-search/scripts/, and resolve() follows
+    the symlink that install-skills.sh puts in ~/.claude/skills, so the checkout
+    is found without any configuration. DEEP_SEARCH_DIR overrides it for a copied
+    install, or when the services and the venv live somewhere else.
+    """
+    override = os.environ.get("DEEP_SEARCH_DIR")
+    if override:
+        return Path(override).expanduser()
+    return Path(__file__).resolve().parents[3]
 
 
 def normalize_proxy_env(proxy: str) -> None:
@@ -133,7 +142,7 @@ def bootstrap() -> None:
 def _stack_dir() -> Path:
     package = repo_dir() / "lib"
     if not package.is_dir():
-        raise BranchFailed(f"нет каталога {package}; задай INTERNET_CLAUDE_DIR")
+        raise BranchFailed(f"нет каталога {package}; задай DEEP_SEARCH_DIR")
     return package
 
 

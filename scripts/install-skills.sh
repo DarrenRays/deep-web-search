@@ -21,8 +21,8 @@ else
 fi
 
 echo
-echo "Set the stack path for the skill (add to ~/.zshrc or ~/.bashrc):"
-echo "    export INTERNET_CLAUDE_DIR=$REPO"
+echo "The skill resolves the symlink to find $REPO, so no path variable is"
+echo "needed. Set DEEP_SEARCH_DIR only if you copied the skill instead."
 echo
 echo "Branch tavily+jina also needs TAVILY_API_KEY_1..3 and JINA_API_KEY in the"
 echo "environment. Without them deep-search runs on searxng+crawl4ai alone."

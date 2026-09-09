@@ -142,7 +142,7 @@ grep -q '^## Социальные сети' "$OUT/t4.md"; check social "блок
 grep -qE 'hackernews|telegram|reddit|mastodon' "$OUT/t4.md"; check social "платформы названы" $?
 
 echo "== 5. no repo -> branch B named, A works =="
-code=$(INTERNET_CLAUDE_DIR=/nonexistent "$S" "crawl4ai release notes" --max-results 2 >"$OUT/t5.md" 2>&1; echo $?)
+code=$(DEEP_SEARCH_DIR=/nonexistent "$S" "crawl4ai release notes" --max-results 2 >"$OUT/t5.md" 2>&1; echo $?)
 check no-repo "exit=$code" $([ "$code" = 0 ] && echo 0 || echo 1)
 grep -q 'нет каталога /nonexistent/lib' "$OUT/t5.md"; check no-repo "причина отказа точна" $?
 grep -q 'tavily+jina:' "$OUT/t5.md"; check no-repo "ветка A отдала результат" $?
@@ -156,7 +156,7 @@ grep -q 'searxng+crawl4ai:' "$OUT/t6.md"; check no-keys "ветка B отдал
 
 echo "== 7. both fail -> exit 3 =="
 code=$(env -u TAVILY_API_KEY_1 -u TAVILY_API_KEY_2 -u TAVILY_API_KEY_3 \
-  INTERNET_CLAUDE_DIR=/nonexistent "$S" "anything" >"$OUT/t7.md" 2>&1; echo $?)
+  DEEP_SEARCH_DIR=/nonexistent "$S" "anything" >"$OUT/t7.md" 2>&1; echo $?)
 check both-fail "exit=$code" $([ "$code" = 3 ] && echo 0 || echo 1)
 grep -cq 'tavily+jina: ' "$OUT/t7.md" && grep -q 'searxng+crawl4ai: ' "$OUT/t7.md"
 check both-fail "обе причины в stderr" $?
@@ -222,7 +222,7 @@ check no-proxy "без прокси mastodon в отказах" $?
 
 echo "== 16. proxy named even when everything fails =="
 code=$(env -u TAVILY_API_KEY_1 -u TAVILY_API_KEY_2 -u TAVILY_API_KEY_3 \
-  INTERNET_CLAUDE_DIR=/nonexistent "$S" "anything" >"$OUT/t16.md" 2>&1; echo $?)
+  DEEP_SEARCH_DIR=/nonexistent "$S" "anything" >"$OUT/t16.md" 2>&1; echo $?)
 grep -q '^прокси: ' "$OUT/t16.md"; check proxy-note "прокси назван и при exit $code" $?
 
 stop_stub

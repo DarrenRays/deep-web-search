@@ -54,9 +54,11 @@ Install the skill and point it at this checkout:
 
 ```bash
 ./scripts/install-skills.sh
-export INTERNET_CLAUDE_DIR="$PWD"     # add to your shell rc
 uv sync                               # the venv the skill re-execs into
 ```
+
+The skill finds `lib/`, `.venv` and `.env` by resolving its own path back to
+this checkout, symlink included — there is no path variable to set.
 
 That is the whole requirement: two containers, one venv, one symlink.
 
@@ -133,8 +135,8 @@ language the page is written in; Claude translates as needed when it answers.
 |---|---|
 | `CRAWL4AI_API_TOKEN` | required; Crawl4AI demands it on every endpoint |
 | `SEARXNG_PORT`, `CRAWL4AI_PORT` | host ports, bound to `127.0.0.1` only |
-| `INTERNET_CLAUDE_DIR` | path to this checkout, default `~/internet-claude` |
 | `TAVILY_API_KEY_1..3`, `JINA_API_KEY` | branch `tavily+jina` |
+| `DEEP_SEARCH_DIR` | path to the checkout; only needed if the skill was copied out of it instead of symlinked |
 | `DEEP_SEARCH_PROXY` | proxy for external requests, default `http://127.0.0.1:8118`, empty = direct |
 | `DEEP_SEARCH_SEARXNG_URL`, `DEEP_SEARCH_CRAWL4AI_URL` | full URLs when the services are not on the default local ports |
 | `SOCIAL_*`, `BLUESKY_*`, `YOUTUBE_API_KEY` | optional social sources, see `.env.example` |
