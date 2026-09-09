@@ -144,7 +144,7 @@ grep -qE 'hackernews|telegram|reddit|mastodon' "$OUT/t4.md"; check social "пл�
 echo "== 5. no repo -> branch B named, A works =="
 code=$(INTERNET_CLAUDE_DIR=/nonexistent "$S" "crawl4ai release notes" --max-results 2 >"$OUT/t5.md" 2>&1; echo $?)
 check no-repo "exit=$code" $([ "$code" = 0 ] && echo 0 || echo 1)
-grep -q 'нет каталога /nonexistent/mcp-server' "$OUT/t5.md"; check no-repo "причина отказа точна" $?
+grep -q 'нет каталога /nonexistent/lib' "$OUT/t5.md"; check no-repo "причина отказа точна" $?
 grep -q 'tavily+jina:' "$OUT/t5.md"; check no-repo "ветка A отдала результат" $?
 
 echo "== 6. no tavily keys -> branch A named, B works (stub) =="

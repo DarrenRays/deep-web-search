@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Custom Search Skill backend: Tavily + Jina.
+Branch A of the deep-search skill: Tavily + Jina.
 
 Что делает:
 1. Принимает поисковый запрос.
@@ -8,7 +8,8 @@ Custom Search Skill backend: Tavily + Jina.
 3. Делает web search через Tavily.
 4. Берёт найденные URL.
 5. Дочитывает и нормализует страницы через один Jina Reader API key.
-6. Возвращает единый JSON для Claude Code.
+6. Возвращает единый JSON — его читает deep_search.py, запуская этот файл
+   подпроцессом; отдельно он тоже работает.
 
 Важно:
 - Используйте только свои ключи и соблюдайте лимиты провайдеров.
@@ -197,7 +198,7 @@ def tavily_search_with_rotation(
             )
 
             if ok:
-                data["_custom_search_meta"] = {
+                data["_tavily_meta"] = {
                     "provider": "tavily",
                     "used_tavily_account": key_index,
                     "attempt": attempt,
@@ -375,7 +376,7 @@ def main() -> int:
         "meta": {
             "tavily_accounts_configured": len(tavily_keys),
             "jina_account_configured": bool(jina_key),
-            "used_tavily_account": tavily_data.get("_custom_search_meta", {}).get("used_tavily_account"),
+            "used_tavily_account": tavily_data.get("_tavily_meta", {}).get("used_tavily_account"),
             "search_depth": args.search_depth,
             "max_results": args.max_results,
             "jina_pages": args.jina_pages,

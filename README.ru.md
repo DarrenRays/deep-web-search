@@ -18,30 +18,26 @@ Self-hosted веб-ресёрч для Claude Code и скилл, который
 ```
 Claude Code
    │
-   ├── скилл deep-search ──┬──> custom-search/search.py ──> Tavily + Jina
-   │                       │
-   │                       └──> импорт модулей mcp-server ──┬──> searxng :8880
-   │                                                        └──> crawl4ai :11235
-   │
-   └── MCP searxng-crawl :8765 ─────────────────────────────┘
-       (те же сервисы, маршрут через tool call)
+   └── скилл deep-search ──┬──> tavily_jina.py ──> Tavily + Jina
+                           │
+                           └──> импорт lib/ ──┬──> searxng :8880
+                                              └──> crawl4ai :11235
 ```
 
-Два маршрута к одним и тем же сервисам — так и задумано. Скилл не тратит
-контекст, пока его не вызвали: схемы инструментов не загружаются. MCP-сервер
-нужен, когда хочется `search_and_scrape` или `social_search` обычным tool call.
+Один процесс, сервера посередине нет: скилл импортирует HTTP-клиенты как
+библиотеку и сам ходит в два контейнера. В контекст модели ничего не грузится,
+пока скилл не вызвали.
 
 ## Структура
 
 | Путь | Что внутри |
 |---|---|
-| `docker-compose.yml` | три сервиса: SearXNG, Crawl4AI, MCP-сервер |
-| `mcp-server/` | MCP-сервер — см. [Инструменты MCP](#инструменты-mcp) |
-| `tests/` | тесты MCP-сервера, `httpx.MockTransport`, без сети |
+| `docker-compose.yml` | два сервиса: SearXNG и Crawl4AI |
+| `lib/` | HTTP-клиенты, проверка URL, соц-адаптеры — их импортирует скилл |
+| `tests/` | тесты `lib/`, `httpx.MockTransport`, без сети |
 | `searxng/settings.yml.example` | шаблон конфига SearXNG |
-| `skills/deep-search/` | скилл: `SKILL.md`, `scripts/deep_search.py`, `tests/e2e.sh` |
-| `skills/custom-search/` | ветка `tavily+jina`, запускается скиллом как подпроцесс |
-| `scripts/install-skills.sh` | линкует оба скилла в `~/.claude/skills` |
+| `skills/deep-search/` | скилл: `SKILL.md`, `scripts/deep_search.py`, `scripts/tavily_jina.py`, `tests/e2e.sh` |
+| `scripts/install-skills.sh` | линкует скилл в `~/.claude/skills` |
 
 ## Установка
 
@@ -49,23 +45,20 @@ Claude Code
 cp .env.example .env          # заполнить CRAWL4AI_API_TOKEN: openssl rand -hex 32
 cp searxng/settings.yml.example searxng/settings.yml
                               # заменить ultrasecretkey: openssl rand -hex 32
-docker compose up -d --build
+docker compose up -d          # searxng и crawl4ai
 ```
 
 `.env` и настоящий `settings.yml` в `.gitignore` — в них секреты.
 
-Поставить скиллы и указать им путь к этому чекауту:
+Поставить скилл и указать ему путь к этому чекауту:
 
 ```bash
 ./scripts/install-skills.sh
 export INTERNET_CLAUDE_DIR="$PWD"     # добавить в ~/.zshrc или ~/.bashrc
+uv sync                               # venv, в который скилл делает re-exec
 ```
 
-По желанию — зарегистрировать MCP-сервер:
-
-```bash
-claude mcp add --transport http --scope user searxng-crawl http://127.0.0.1:8765/mcp
-```
+Это всё, что нужно: два контейнера, один venv, один симлинк.
 
 ## Запуск скилла
 
@@ -98,10 +91,6 @@ claude mcp add --transport http --scope user searxng-crawl http://127.0.0.1:8765
 | `/deep-search python 3.14 release notes` | явный вызов, запрос — всё, что после команды |
 | обычная просьба: «найди, что пишут про X» | описание скилла совпадает, Claude запускает его сам |
 | строка `bash` выше | без Claude вообще, отчёт уходит в stdout |
-
-`/custom-search` — ручной маршрут по одному источнику: только Tavily и Jina,
-без SearXNG. Он намеренно отключён для автовызова, чтобы Claude не выбирал его
-вместо `deep-search`.
 
 Флаги можно называть словами, скилл сам их разложит: «быстро глянь» →
 `--only tavily --max-results 5 --full-pages 3`, «перерой всё» →
@@ -142,7 +131,7 @@ claude mcp add --transport http --scope user searxng-crawl http://127.0.0.1:8765
 | Переменная | Зачем |
 |---|---|
 | `CRAWL4AI_API_TOKEN` | обязательна: Crawl4AI требует её на каждом эндпоинте |
-| `SEARXNG_PORT`, `CRAWL4AI_PORT`, `MCP_PORT` | порты на хосте, только на `127.0.0.1` |
+| `SEARXNG_PORT`, `CRAWL4AI_PORT` | порты на хосте, только на `127.0.0.1` |
 | `INTERNET_CLAUDE_DIR` | путь к этому чекауту, по умолчанию `~/internet-claude` |
 | `TAVILY_API_KEY_1..3`, `JINA_API_KEY` | ветка `tavily+jina` |
 | `DEEP_SEARCH_PROXY` | прокси для внешних запросов, по умолчанию `http://127.0.0.1:8118`, пустое значение = напрямую |
@@ -153,25 +142,9 @@ claude mcp add --transport http --scope user searxng-crawl http://127.0.0.1:8765
 (Privoxy или аналог). Если там пусто, скилл говорит об этом в шапке и работает
 напрямую; `--no-proxy` или `DEEP_SEARCH_PROXY=` выключают прокси совсем.
 
-## Инструменты MCP
-
-| Инструмент | Для чего |
-|---|---|
-| `search_and_scrape(query, …)` | Обычный случай: найти и вернуть читаемый текст верхних страниц. |
-| `search(query, …)` | Только заголовки, URL и сниппеты. Дёшево выбрать, что стоит читать. |
-| `fetch_url(url, …)` | Одна страница, URL которой уже известен. |
-| `social_search(query, …)` | Что пишут в соцсетях — сразу по всем настроенным платформам. |
-| `social_sources()` | Какие платформы доступны и чего не хватает остальным. |
-
-`search_and_scrape` режет вывод дважды: `max_chars_per_page` (по умолчанию 4000)
-и жёсткий потолок `MAX_TOTAL_CHARS` в `mcp-server/server.py`. Без них пять
-необрезанных страниц спокойно кладут в контекст 150–200 тыс. символов.
-Результаты дедуплицируются до двух страниц на хост, чтобы один многословный сайт
-не съел весь бюджет.
-
 ## Поиск по соцсетям
 
-`social_search` — единая точка входа над несколькими платформами. Он веером
+`--social` добавляет один блок сразу по нескольким платформам. Он веером
 опрашивает их параллельно, приводит любой ответ к одной форме поста, схлопывает
 ссылки, встретившиеся больше чем на одной платформе, и ранжирует итог. Сырые
 метрики несравнимы — очки HN идут на тысячи, лайки Mastodon на десятки, — поэтому
@@ -218,18 +191,18 @@ claude mcp add --transport http --scope user searxng-crawl http://127.0.0.1:8765
 
 ## Безопасность
 
-`mcp-server/sanitize.py` резолвит каждый URL и отклоняет частные, loopback,
-link-local и зарезервированные адреса. Инструменты принимают URL, предложенные
-моделью, — без этой проверки сервер проксировал бы запросы внутрь compose-сети,
-на docker-хост и к эндпоинтам метаданных облака. Скилл импортирует тот же
-модуль, а не повторяет HTTP-контракты, поэтому ветку B вычищает ровно тот же
-код.
+`lib/sanitize.py` резолвит каждый URL и отклоняет частные, loopback, link-local
+и зарезервированные адреса. URL приходят от поисковых движков и, косвенно, из
+формулировки модели — без этой проверки краулер можно было бы навести на
+docker-хост и на эндпоинты метаданных облака. Ветка B прогоняет через неё каждую
+находку до того, как URL увидит Crawl4AI; отклонённый попадает в отказы с
+причиной.
 
 ## Разработка
 
 ```bash
 uv sync
-uv run pytest -q                      # MCP-сервер, без сети
+uv run pytest -q                      # модули lib/, без сети
 
 DEEP_SEARCH_SCRIPT="$PWD/skills/deep-search/scripts/deep_search.py" \
     bash skills/deep-search/tests/e2e.sh
@@ -241,9 +214,7 @@ E2E-сьют покрывает 18 сценариев: каждая ветка �
 прокси и `--no-proxy`. Подряд не гонять — серия запросов заставляет движки
 SearXNG отдавать капчу.
 
-Тесты используют `httpx.MockTransport` и в сеть не ходят. Контейнер ставит
-зависимости из того же `pyproject.toml`, что и тесты, поэтому образ и локальный
-прогон не расходятся.
+Юнит-тесты используют `httpx.MockTransport` и в сеть не ходят.
 
 ## Заметки
 
@@ -254,9 +225,9 @@ SearXNG отдавать капчу.
   каталог `./searxng`, а не отдельный файл.
 - `crawl4ai` нужен `shm_size: 1g`: с дефолтными 64 МБ Chromium падает на тяжёлых
   страницах.
-- Добавить соц-платформу — это один класс в `mcp-server/sources.py` с `name`,
+- Добавить соц-платформу — это один класс в `lib/sources.py` с `name`,
   `unavailable` и `async search(spec)` плюс одна запись в `build_sources`. В
-  агрегаторе и инструментах ничего не меняется.
+  агрегаторе и в скилле ничего не меняется.
 
 ## Лицензия
 

@@ -1,6 +1,6 @@
 ---
 name: deep-search
-description: Full web research through two sources at once — Tavily+Jina (the custom-search script) and self-hosted SearXNG+Crawl4AI — run in parallel, deduplicated by URL, reported as one document. Use it when coverage and cross-checking matter: comparing sources, a disputed or fresh fact, changelogs and release notes, market overviews, "collect everything there is on X", plus an optional social media block. This is the only user-level web search route: custom-search is disabled and lives inside as the tavily+jina branch. By default it collects 50 sources per branch and reads 10 of them in full. For a quick question use the same skill with `--only tavily --max-results 5 --full-pages 3`.
+description: Full web research through two sources at once — Tavily+Jina and self-hosted SearXNG+Crawl4AI — run in parallel, deduplicated by URL, reported as one document. Use it when coverage and cross-checking matter: comparing sources, a disputed or fresh fact, changelogs and release notes, market overviews, "collect everything there is on X", plus an optional social media block. This is the only web search route: the Tavily+Jina script lives inside the skill as branch A. By default it collects 50 sources per branch and reads 10 of them in full. For a quick question use the same skill with `--only tavily --max-results 5 --full-pages 3`.
 allowed-tools: Bash(~/.claude/skills/deep-search/scripts/deep_search.py *)
 ---
 
@@ -10,13 +10,13 @@ One query goes to two independent stacks at once; the results are merged by URL:
 
 | Branch | How it fetches | Cost |
 |---|---|---|
-| `tavily+jina` | `~/.claude/skills/custom-search/scripts/search.py` (Tavily search + Jina Reader) | paid keys |
+| `tavily+jina` | `scripts/tavily_jina.py` next to this skill (Tavily search + Jina Reader) | paid keys |
 | `searxng+crawl4ai` | self-hosted SearXNG `127.0.0.1:8880` + Crawl4AI `127.0.0.1:11235` over plain HTTP | free, no rate limit |
 
-The `searxng-crawl` MCP server is not involved — the skill imports the stack's
-modules (`backends.py`, `sanitize.py`, `sources.py`, `aggregate.py`,
-`social.py`) from `INTERNET_CLAUDE_DIR` and calls the services itself. Nothing
-is loaded into context until the skill is called.
+The skill imports the stack's modules (`backends.py`, `sanitize.py`,
+`sources.py`, `aggregate.py`, `social.py`) from `INTERNET_CLAUDE_DIR/lib` and
+calls the services itself. Nothing is loaded into context until the skill is
+called.
 
 ## When to use it
 
@@ -28,9 +28,7 @@ is loaded into context until the skill is called.
 
 ## When not to
 
-- one quick fact → this same skill with `--only tavily --max-results 5 --full-pages 3`
-  (the `custom-search` skill is disabled for auto-invocation; its script is
-  branch A here);
+- one quick fact → this same skill with `--only tavily --max-results 5 --full-pages 3`;
 - the exact URL is known → `fetch_url` or `curl`;
 - a question about a library's API or config → the `find-docs` skill;
 - the internals of a GitHub repository → the `deepwiki` skill.
@@ -54,7 +52,7 @@ is loaded into context until the skill is called.
 | `--time-range` | `` | `day` \| `week` \| `month` \| `year` |
 | `--only tavily\|searxng` | both | switch one branch off |
 | `--fresh` | off | `cache_mode=bypass` on Crawl4AI |
-| `--social` | off | add a `social_search` block across 8 platforms |
+| `--social` | off | add a social block across 8 platforms |
 | `--social-limit N` | 20 | posts in the social block |
 | `--social-per-platform N` | 8 | how many to request from each platform |
 | `--social-chars N` | 600 | trim one post's text |
@@ -137,7 +135,7 @@ keeps working, and the exit code stays `0`. An empty list is never printed as
 | Message | What to do |
 |---|---|
 | `tavily+jina — ERROR: No TAVILY_API_KEY_1..3 variables found` | the keys are not in the process environment; configure them outside the chat |
-| `searxng+crawl4ai — нет каталога …/mcp-server` | set `INTERNET_CLAUDE_DIR` |
+| `searxng+crawl4ai — нет каталога …/lib` | set `INTERNET_CLAUDE_DIR` |
 | `searxng+crawl4ai — httpx недоступен` | run `uv sync` in the stack directory |
 | `searxng+crawl4ai — CRAWL4AI_API_TOKEN не задан` | add the token to the environment or to `<repo>/.env` |
 | `searxng+crawl4ai — SearXNG вернул 0 результатов; движки: …` | rare with `--engines auto`: a pool of 52 engines survives a CAPTCHA on the main four. If it is still zero — wait, or use `--engines builtin` |
@@ -204,7 +202,7 @@ back to back: a burst of queries makes the SearXNG engines serve CAPTCHAs.
 | Variable | For |
 |---|---|
 | `DEEP_SEARCH_PROXY` | proxy for external requests, `http://127.0.0.1:8118` by default; an empty value means direct |
-| `TAVILY_API_KEY_1..3`, `JINA_API_KEY` | branch `tavily+jina` (read by `custom-search` itself) |
+| `TAVILY_API_KEY_1..3`, `JINA_API_KEY` | branch `tavily+jina` (read by `tavily_jina.py` itself) |
 | `CRAWL4AI_API_TOKEN` | branch `searxng+crawl4ai`; falls back to `<repo>/.env` |
 | `INTERNET_CLAUDE_DIR` | path to the stack, `~/internet-claude` by default |
 | `SEARXNG_PORT`, `CRAWL4AI_PORT` | localhost ports, `8880` / `11235` by default |

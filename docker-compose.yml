@@ -1,11 +1,11 @@
-name: internet-claude
+name: deep-search-stack
 
 services:
   searxng:
     image: searxng/searxng:latest
     container_name: searxng
     restart: unless-stopped
-    networks: [internet-net]
+    networks: [search-net]
     ports:
       - "127.0.0.1:${SEARXNG_PORT:-8880}:8080"
     volumes:
@@ -22,7 +22,7 @@ services:
     image: unclecode/crawl4ai:latest
     container_name: crawl4ai
     restart: unless-stopped
-    networks: [internet-net]
+    networks: [search-net]
     ports:
       - "127.0.0.1:${CRAWL4AI_PORT:-11235}:11235"
     environment:
@@ -36,36 +36,8 @@ services:
       retries: 3
       start_period: 40s
 
-  searxng-mcp:
-    build:
-      context: .
-      dockerfile: mcp-server/Dockerfile
-    container_name: searxng-mcp
-    restart: unless-stopped
-    networks: [internet-net]
-    ports:
-      - "127.0.0.1:${MCP_PORT:-8765}:8765"
-    environment:
-      SEARXNG_URL: http://searxng:8080
-      CRAWL4AI_URL: http://crawl4ai:11235
-      CRAWL4AI_API_TOKEN: ${CRAWL4AI_API_TOKEN:?set CRAWL4AI_API_TOKEN in .env}
-      MCP_HOST: 0.0.0.0
-      MCP_PORT: 8765
-      SOCIAL_REDDIT_SUBREDDITS: ${SOCIAL_REDDIT_SUBREDDITS:-}
-      SOCIAL_TELEGRAM_CHANNELS: ${SOCIAL_TELEGRAM_CHANNELS:-}
-      SOCIAL_MASTODON_INSTANCES: ${SOCIAL_MASTODON_INSTANCES:-}
-      SOCIAL_RSS_FEEDS: ${SOCIAL_RSS_FEEDS:-}
-      BLUESKY_IDENTIFIER: ${BLUESKY_IDENTIFIER:-}
-      BLUESKY_APP_PASSWORD: ${BLUESKY_APP_PASSWORD:-}
-      YOUTUBE_API_KEY: ${YOUTUBE_API_KEY:-}
-    depends_on:
-      searxng:
-        condition: service_started
-      crawl4ai:
-        condition: service_healthy
-
 networks:
-  internet-net:
+  search-net:
     driver: bridge
 
 volumes:

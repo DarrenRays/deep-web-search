@@ -1,7 +1,7 @@
 #!/bin/bash
-# Link the two skills into ~/.claude/skills and point them at this checkout.
+# Link the deep-search skill into ~/.claude/skills.
 #
-# Symlinks rather than copies: editing the skill in the repo is the same edit
+# A symlink rather than a copy: editing the skill in the repo is the same edit
 # Claude Code loads on the next run, so the published copy cannot drift from the
 # installed one.
 
@@ -12,15 +12,13 @@ SKILLS_DIR="${CLAUDE_SKILLS_DIR:-$HOME/.claude/skills}"
 
 mkdir -p "$SKILLS_DIR"
 
-for skill in deep-search custom-search; do
-    target="$SKILLS_DIR/$skill"
-    if [ -e "$target" ] && [ ! -L "$target" ]; then
-        echo "skip $skill: $target exists and is not a symlink" >&2
-        continue
-    fi
-    ln -sfn "$REPO/skills/$skill" "$target"
-    echo "linked $target -> $REPO/skills/$skill"
-done
+target="$SKILLS_DIR/deep-search"
+if [ -e "$target" ] && [ ! -L "$target" ]; then
+    echo "skip: $target exists and is not a symlink" >&2
+else
+    ln -sfn "$REPO/skills/deep-search" "$target"
+    echo "linked $target -> $REPO/skills/deep-search"
+fi
 
 echo
 echo "Set the stack path for the skill (add to ~/.zshrc or ~/.bashrc):"

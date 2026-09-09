@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """Deep search: Tavily+Jina and self-hosted SearXNG+Crawl4AI in parallel, merged.
 
-Runs without the searxng-crawl MCP server, so no tool schemas reach the model
-context until this skill is called. Branch A shells out to the custom-search
-skill's script; branch B imports the stack's own modules from
-INTERNET_CLAUDE_DIR instead of restating its HTTP contracts, which also keeps
-the SSRF vetting in sanitize.py on the path.
+Nothing reaches the model context until this skill is called. Branch A shells
+out to tavily_jina.py next to this file; branch B imports the stack's own
+modules from INTERNET_CLAUDE_DIR/lib instead of restating its HTTP contracts,
+which also keeps the SSRF vetting in sanitize.py on the path.
 """
 
 from __future__ import annotations
@@ -26,13 +25,8 @@ from urllib.parse import urlsplit
 
 DEFAULT_REPO = "~/internet-claude"
 BOOTSTRAP_FLAG = "DEEP_SEARCH_BOOTSTRAPPED"
-CUSTOM_SEARCH_CANDIDATES = (
-    "~/.claude/skills/custom-search/scripts/search.py",
-    "~/.claude-account/skills/custom-search/scripts/search.py",
-    "~/.claude/skills/.disabled/custom-search/scripts/search.py",
-    "~/.claude-account/skills/.disabled/custom-search/scripts/search.py",
-)
-CUSTOM_SEARCH_TIMEOUT = 180
+TAVILY_SCRIPT = "tavily_jina.py"
+TAVILY_TIMEOUT = 180
 TAVILY = "tavily+jina"
 SELFHOSTED = "searxng+crawl4ai"
 TAVILY_MAX_RESULTS = 20
@@ -137,7 +131,7 @@ def bootstrap() -> None:
 
 
 def _stack_dir() -> Path:
-    package = repo_dir() / "mcp-server"
+    package = repo_dir() / "lib"
     if not package.is_dir():
         raise BranchFailed(f"нет каталога {package}; задай INTERNET_CLAUDE_DIR")
     return package
@@ -204,24 +198,18 @@ def _first_line(text: str) -> str:
     return ""
 
 
-def custom_search_script() -> Path:
-    """Locate the Tavily+Jina script.
-
-    It is looked up rather than hardcoded because custom-search is disabled as a
-    skill while this branch still runs its script, so the directory may move.
-    """
-    for candidate in CUSTOM_SEARCH_CANDIDATES:
-        path = Path(candidate).expanduser()
-        if path.exists():
-            return path
-    looked = ", ".join(CUSTOM_SEARCH_CANDIDATES)
-    raise BranchFailed(f"скрипт custom-search не найден; искал в {looked}")
+def tavily_script() -> Path:
+    """Locate the Tavily+Jina script that runs branch A."""
+    path = Path(__file__).resolve().parent / TAVILY_SCRIPT
+    if not path.exists():
+        raise BranchFailed(f"скрипт ветки не найден: {path}")
+    return path
 
 
 def search_tavily(
     query: str, *, max_results: int, full_pages: int, max_chars: int
 ) -> list[Entry]:
-    script = custom_search_script()
+    script = tavily_script()
     # Tavily refuses more than 20 results per request; pages read in full are
     # capped by the same tier budget the self-hosted branch uses.
     asked = max(1, min(max_results, TAVILY_MAX_RESULTS))
@@ -238,10 +226,10 @@ def search_tavily(
     ]
     try:
         done = subprocess.run(
-            command, capture_output=True, text=True, timeout=CUSTOM_SEARCH_TIMEOUT
+            command, capture_output=True, text=True, timeout=TAVILY_TIMEOUT
         )
     except subprocess.TimeoutExpired as exc:
-        raise BranchFailed(f"не ответил за {CUSTOM_SEARCH_TIMEOUT} с") from exc
+        raise BranchFailed(f"не ответил за {TAVILY_TIMEOUT} с") from exc
     if done.returncode != 0:
         raise BranchFailed(_first_line(done.stderr) or f"exit code {done.returncode}")
     try:

@@ -1,10 +1,9 @@
 [project]
-name = "searxng-crawl-mcp"
+name = "deep-search-stack"
 version = "0.1.0"
-description = "MCP server joining SearXNG search, Crawl4AI page extraction and federated social search"
+description = "Deep search for Claude Code: Tavily+Jina and self-hosted SearXNG+Crawl4AI in parallel, merged into one report"
 requires-python = ">=3.12"
 dependencies = [
-    "mcp==2.0.0",
     "httpx>=0.28",
     "selectolax>=0.3.21",
     "defusedxml>=0.7.1",
@@ -18,5 +17,5 @@ dev = [
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
-pythonpath = ["mcp-server"]
+pythonpath = ["lib"]
 testpaths = ["tests"]

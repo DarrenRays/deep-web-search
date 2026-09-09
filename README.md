@@ -17,30 +17,26 @@ labelled with both sources — that is the cross-check the two branches exist fo
 ```
 Claude Code
    │
-   ├── skill deep-search ──┬──> custom-search/search.py ──> Tavily + Jina
-   │                       │
-   │                       └──> imports mcp-server modules ──┬──> searxng :8880
-   │                                                         └──> crawl4ai :11235
-   │
-   └── MCP searxng-crawl :8765 ──────────────────────────────┘
-       (same services, tool-call route)
+   └── skill deep-search ──┬──> tavily_jina.py ──> Tavily + Jina
+                           │
+                           └──> imports lib/ ──┬──> searxng :8880
+                                               └──> crawl4ai :11235
 ```
 
-Two routes into the same services, on purpose. The skill spends no context until
-it is called, because no tool schemas are loaded; the MCP server is there when
-you want `search_and_scrape` or `social_search` as a normal tool call.
+One process, no server in between: the skill imports the HTTP clients as a
+library and calls the two containers itself. Nothing is loaded into the model's
+context until the skill is called.
 
 ## Layout
 
 | Path | Holds |
 |---|---|
-| `docker-compose.yml` | the three services: SearXNG, Crawl4AI, MCP server |
-| `mcp-server/` | the MCP server — see [MCP tools](#mcp-tools) |
-| `tests/` | MCP server tests, `httpx.MockTransport`, no network |
+| `docker-compose.yml` | the two services: SearXNG and Crawl4AI |
+| `lib/` | HTTP clients, URL vetting, social adapters — imported by the skill |
+| `tests/` | tests for `lib/`, `httpx.MockTransport`, no network |
 | `searxng/settings.yml.example` | SearXNG config template |
-| `skills/deep-search/` | the skill: `SKILL.md`, `scripts/deep_search.py`, `tests/e2e.sh` |
-| `skills/custom-search/` | the `tavily+jina` branch, run as a subprocess by the skill |
-| `scripts/install-skills.sh` | links both skills into `~/.claude/skills` |
+| `skills/deep-search/` | the skill: `SKILL.md`, `scripts/deep_search.py`, `scripts/tavily_jina.py`, `tests/e2e.sh` |
+| `scripts/install-skills.sh` | links the skill into `~/.claude/skills` |
 
 ## Setup
 
@@ -48,24 +44,21 @@ you want `search_and_scrape` or `social_search` as a normal tool call.
 cp .env.example .env          # fill in CRAWL4AI_API_TOKEN: openssl rand -hex 32
 cp searxng/settings.yml.example searxng/settings.yml
                               # replace ultrasecretkey: openssl rand -hex 32
-docker compose up -d --build
+docker compose up -d          # searxng and crawl4ai
 ```
 
 Both `.env` and the real `settings.yml` are gitignored because they hold
 secrets.
 
-Install the skills and point them at this checkout:
+Install the skill and point it at this checkout:
 
 ```bash
 ./scripts/install-skills.sh
 export INTERNET_CLAUDE_DIR="$PWD"     # add to your shell rc
+uv sync                               # the venv the skill re-execs into
 ```
 
-Optionally register the MCP server as well:
-
-```bash
-claude mcp add --transport http --scope user searxng-crawl http://127.0.0.1:8765/mcp
-```
+That is the whole requirement: two containers, one venv, one symlink.
 
 ## Using the skill
 
@@ -99,10 +92,6 @@ Three ways in, same script underneath:
 | `/deep-search python 3.14 release notes` | explicit call, the query is everything after the command |
 | ask normally — "find out what people say about X" | the skill's description matches and Claude runs it on its own |
 | the `bash` line above | no Claude at all; the report goes to stdout |
-
-`/custom-search` is the manual single-source route: Tavily plus Jina only, no
-SearXNG. It is disabled for auto-invocation on purpose, so Claude will not pick
-it over `deep-search`.
 
 Flags can be named in plain words, and the skill maps them itself: "quick look"
 becomes `--only tavily --max-results 5 --full-pages 3`, "dig up everything"
@@ -143,7 +132,7 @@ language the page is written in; Claude translates as needed when it answers.
 | Variable | For |
 |---|---|
 | `CRAWL4AI_API_TOKEN` | required; Crawl4AI demands it on every endpoint |
-| `SEARXNG_PORT`, `CRAWL4AI_PORT`, `MCP_PORT` | host ports, bound to `127.0.0.1` only |
+| `SEARXNG_PORT`, `CRAWL4AI_PORT` | host ports, bound to `127.0.0.1` only |
 | `INTERNET_CLAUDE_DIR` | path to this checkout, default `~/internet-claude` |
 | `TAVILY_API_KEY_1..3`, `JINA_API_KEY` | branch `tavily+jina` |
 | `DEEP_SEARCH_PROXY` | proxy for external requests, default `http://127.0.0.1:8118`, empty = direct |
@@ -154,25 +143,9 @@ The proxy default assumes something listening on `127.0.0.1:8118` (Privoxy or
 similar). If nothing is there, the skill says so in the header and goes direct;
 `--no-proxy` or `DEEP_SEARCH_PROXY=` turns it off for good.
 
-## MCP tools
-
-| Tool | Use it for |
-|---|---|
-| `search_and_scrape(query, …)` | The normal case: search, then return the readable text of the top pages. |
-| `search(query, …)` | Titles, URLs and snippets only. Cheap way to pick what is worth reading. |
-| `fetch_url(url, …)` | One page whose URL you already know. |
-| `social_search(query, …)` | What people are saying on social media, across every configured platform at once. |
-| `social_sources()` | Which platforms are reachable and what the rest still need. |
-
-`search_and_scrape` caps output twice: `max_chars_per_page` (default 4000) and a
-hard `MAX_TOTAL_CHARS` ceiling in `mcp-server/server.py`. Without those, five
-unclipped pages routinely land 150–200k characters in the context. Results are
-deduplicated to at most two pages per host, so one verbose site cannot consume
-the whole budget.
-
 ## Social search
 
-`social_search` is one entry point over several platforms. It fans out
+`--social` adds one block over several platforms at once. It fans out
 concurrently, normalises every answer into the same post shape, collapses links
 that appear on more than one platform, and ranks the result. Because raw scores
 are not comparable — HN points run into the thousands, Mastodon favourites into
@@ -193,9 +166,8 @@ that percentile is combined with freshness.
 Results are cached in memory for 15 minutes per source and query, so re-asking
 within a session costs no requests.
 
-A source that is not configured is left out rather than reported as broken; ask
-for it by name in `platforms` and it will tell you exactly what it needs. A
-source that *fails* is always named at the end of the answer, never silently
+A source that is not configured is left out rather than reported as broken. A
+source that *fails* is always named at the end of the block, never silently
 dropped, because an outage reported as "nothing found" is the worst way for a
 research tool to be wrong.
 
@@ -218,18 +190,18 @@ research tool to be wrong.
 
 ## Safety
 
-`mcp-server/sanitize.py` resolves every URL and refuses private, loopback,
-link-local and reserved addresses. The tools accept URLs proposed by a model, so
-without that check the server would proxy requests into the compose network, the
-Docker host and cloud metadata endpoints. The skill imports the same module
-rather than restating the HTTP contracts, so branch B is vetted by exactly the
-same code.
+`lib/sanitize.py` resolves every URL and refuses private, loopback, link-local
+and reserved addresses. The URLs come from search engines and, indirectly, from
+a model's phrasing of a query, so without that check the crawler could be
+pointed at the Docker host and at cloud metadata endpoints. Branch B runs every
+hit through it before Crawl4AI sees the URL; a rejected one is reported with its
+reason.
 
 ## Development
 
 ```bash
 uv sync
-uv run pytest -q                      # MCP server, no network
+uv run pytest -q                      # library modules, no network
 
 DEEP_SEARCH_SCRIPT="$PWD/skills/deep-search/scripts/deep_search.py" \
     bash skills/deep-search/tests/e2e.sh
@@ -241,9 +213,7 @@ social block, both degradations, exit code 3, the output budget, JSON,
 fallback and `--no-proxy`. Do not run it back to back — a burst of queries makes
 SearXNG's engines serve CAPTCHAs.
 
-Tests use `httpx.MockTransport` and never touch the network. The container
-installs its dependencies from the same `pyproject.toml`, so the image and the
-test run cannot drift apart.
+Unit tests use `httpx.MockTransport` and never touch the network.
 
 ## Notes
 
@@ -253,9 +223,9 @@ test run cannot drift apart.
   `./searxng` directory rather than the single file.
 - `crawl4ai` needs `shm_size: 1g`; Chromium crashes on heavy pages with the
   64MB default.
-- Adding a social platform is one class in `mcp-server/sources.py` with `name`,
+- Adding a social platform is one class in `lib/sources.py` with `name`,
   `unavailable` and `async search(spec)`, plus one entry in `build_sources`.
-  Nothing in the aggregator or the tools changes.
+  Nothing in the aggregator or the skill changes.
 
 ## License
 
