@@ -248,6 +248,15 @@ def normalize_with_jina(
             "content": "",
         }
 
+    # urlopen also speaks file:// and ftp://, and these URLs come from a search engine.
+    if not url.strip().lower().startswith(("http://", "https://")):
+        return {
+            "url": url,
+            "ok": False,
+            "error": "unsupported URL scheme, only http and https are read",
+            "content": "",
+        }
+
     reader_url = build_jina_reader_url(url)
 
     headers = {

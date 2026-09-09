@@ -79,3 +79,12 @@ def test_vetoed_addresses_never_reach_the_browser_block():
 
 def test_no_blocked_section_without_candidates():
     assert "Заблокировано" not in report([Failure("tavily+jina", "no keys")])
+
+
+def test_only_http_urls_reach_the_reader():
+    from tavily_jina import normalize_with_jina
+
+    for url in ("file:///etc/passwd", "ftp://example.com/x", "gopher://example.com"):
+        result = normalize_with_jina(url, "key", timeout=1, max_chars=10)
+        assert result["ok"] is False
+        assert "scheme" in result["error"]
