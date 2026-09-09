@@ -62,6 +62,16 @@ this checkout, symlink included — there is no path variable to set.
 
 That is the whole requirement: two containers, one venv, one symlink.
 
+Recommended on top of that — a Playwright MCP, so Claude can open the pages that
+refuse the crawler:
+
+```bash
+claude mcp add playwright npx @playwright/mcp@latest
+```
+
+Without it the skill works exactly as before; blocked pages simply stay unread.
+See [Blocked pages](#blocked-pages) below.
+
 ## Using the skill
 
 ```bash
@@ -84,6 +94,29 @@ rest as one line each with title, URL, engine and snippet, so you can ask for a
 specific one to be read next. Both branches down is exit code `3` with the
 reasons on stderr; one branch down is reported in the header and the other still
 answers.
+
+## Blocked pages
+
+Sites that serve a Cloudflare challenge, answer HTTP 403/429 or return a body
+with no text are not dropped from the report. They go into their own section,
+capped at three per run:
+
+```
+### Заблокировано, добрать браузером (2)
+- https://example.com/a — Blocked by anti-bot protection: Cloudflare JS challenge
+- https://example.com/b — page had no text content
+```
+
+The script cannot open them itself — it is a plain subprocess, and MCP tools are
+called by the model. So the section is an instruction to Claude: navigate to each
+URL with the Playwright MCP, read `document.body.innerText`, close the browser.
+`skills/deep-search/SKILL.md` spells out the procedure and its limits.
+
+Addresses that failed the SSRF check or did not resolve stay in
+`### Не удалось получить` and are never offered to the browser — that separation
+is the point of the split, and `tests/test_report.py` pins it.
+
+With `--json`, the same list comes back as `blocked[]`.
 
 ## Calling it from Claude Code
 

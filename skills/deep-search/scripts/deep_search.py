@@ -54,6 +54,20 @@ PROXY_ENV = (
     "ALL_PROXY",
     "NO_PROXY",
 )
+# Reasons that mean a live page closed to the crawler, not a broken address.
+# Crawl4AI passes the first ones through from its own error_message; the last is
+# set by the text filter when a challenge page came back with HTTP 200.
+BROWSER_RETRY_MARKERS = (
+    "anti-bot",
+    "cloudflare",
+    "captcha",
+    "http 401",
+    "http 403",
+    "http 429",
+    "http 503",
+    "page had no text content",
+)
+BROWSER_RETRY_MAX = 3
 
 
 class BranchFailed(RuntimeError):
@@ -68,6 +82,25 @@ class Entry:
     snippet: str = ""
     engine: str = ""
     sources: list[str] = field(default_factory=list)
+
+
+@dataclass
+class Failure:
+    source: str
+    reason: str
+    # A page a browser could still open. Only set for a crawl failure, never for
+    # an SSRF veto or a dead domain: those addresses must not be handed onwards.
+    retryable: bool = False
+
+
+def browser_can_retry(reason: str) -> bool:
+    lowered = reason.lower()
+    return any(marker in lowered for marker in BROWSER_RETRY_MARKERS)
+
+
+def browser_candidates(failures: list[Failure]) -> list[Failure]:
+    """Pages worth reopening in a browser, capped so the retry stays cheap."""
+    return [failure for failure in failures if failure.retryable][:BROWSER_RETRY_MAX]
 
 
 def repo_dir() -> Path:
@@ -394,7 +427,7 @@ async def search_selfhosted(
     engines: str,
     search_timeout: float,
     fresh: bool,
-) -> tuple[list[Entry], list[tuple[str, str]], str]:
+) -> tuple[list[Entry], list[Failure], str]:
     backends, sanitize = _stack_modules("backends", "sanitize")
     token = crawl_token()
     chosen, engines_warning = await resolve_engines(client, engines)
@@ -467,14 +500,16 @@ async def search_selfhosted(
 
 async def _crawl_batch(
     crawler, urls: list[str], by_url: dict, cache_mode: str
-) -> tuple[list[Entry], list[tuple[str, str]]]:
+) -> tuple[list[Entry], list[Failure]]:
     if not urls:
         return [], []
     entries: list[Entry] = []
-    failures: list[tuple[str, str]] = []
+    failures: list[Failure] = []
     for page in await crawler.crawl(urls, cache_mode=cache_mode):
         if page.error:
-            failures.append((page.url, page.error))
+            failures.append(
+                Failure(page.url, page.error, retryable=browser_can_retry(page.error))
+            )
             continue
         hit = by_url.get(page.url)
         entries.append(
@@ -490,7 +525,7 @@ async def _crawl_batch(
     return entries, failures
 
 
-def _describe_rejects(rejected: list[tuple[str, str]]) -> list[tuple[str, str]]:
+def _describe_rejects(rejected: list[tuple[str, str]]) -> list[Failure]:
     """Separate dead domains from a real SSRF veto.
 
     sanitize blocks both with one message, and a wide engine pool drags in
@@ -498,7 +533,7 @@ def _describe_rejects(rejected: list[tuple[str, str]]) -> list[tuple[str, str]]:
     failure block readable while every private-address hit stays itemised.
     """
     dead = 0
-    described: list[tuple[str, str]] = []
+    described: list[Failure] = []
     for url, reason in rejected:
         host = urlsplit(url).hostname or ""
         try:
@@ -506,10 +541,13 @@ def _describe_rejects(rejected: list[tuple[str, str]]) -> list[tuple[str, str]]:
         except socket.gaierror:
             dead += 1
             continue
-        described.append((url, reason))
+        described.append(Failure(url, reason))
     if dead:
         described.append(
-            (f"{dead} ссыл(ок) от мусорных движков", "домен не резолвится, отброшено до краула")
+            Failure(
+                f"{dead} ссыл(ок) от мусорных движков",
+                "домен не резолвится, отброшено до краула",
+            )
         )
     return described
 
@@ -533,7 +571,7 @@ async def search_social(
 
 async def selfhosted_branch(
     args,
-) -> tuple[list[Entry], list[tuple[str, str]], str, str]:
+) -> tuple[list[Entry], list[Failure], str, str]:
     httpx = _require_httpx()
     # Proxy comes from the env normalize_proxy_env() has already rewritten, which
     # keeps 127.0.0.1 (SearXNG, Crawl4AI) direct and sends external hosts through.
@@ -618,7 +656,7 @@ def merge(groups: list[list[Entry]], canonicalize) -> list[Entry]:
 def render(
     query: str,
     entries: list[Entry],
-    failures: list[tuple[str, str]],
+    failures: list[Failure],
     stats: list[str],
     *,
     max_chars_per_page: int,
@@ -672,8 +710,15 @@ def render(
         )
         parts.append(f"---\n\n## Ещё источники ({len(brief)})\n{listed}")
 
-    if failures:
-        listed = "\n".join(f"- {name} — {reason}" for name, reason in failures)
+    blocked = browser_candidates(failures)
+    if blocked:
+        listed = "\n".join(f"- {failure.source} — {failure.reason}" for failure in blocked)
+        parts.append(f"### Заблокировано, добрать браузером ({len(blocked)})\n{listed}")
+
+    picked = {id(failure) for failure in blocked}
+    rest = [failure for failure in failures if id(failure) not in picked]
+    if rest:
+        listed = "\n".join(f"- {failure.source} — {failure.reason}" for failure in rest)
         parts.append(f"### Не удалось получить\n{listed}")
     return "\n\n".join(parts)
 
@@ -699,7 +744,7 @@ async def run(args) -> tuple[str, int]:
     outcomes = await asyncio.gather(*branches, return_exceptions=True)
 
     groups: list[list[Entry]] = []
-    failures: list[tuple[str, str]] = []
+    failures: list[Failure] = []
     stats: list[str] = []
     social_block = ""
     engines_note = ""
@@ -707,7 +752,7 @@ async def run(args) -> tuple[str, int]:
 
     for name, outcome in zip(names, outcomes, strict=True):
         if isinstance(outcome, BaseException):
-            failures.append((name, _reason(outcome)))
+            failures.append(Failure(name, _reason(outcome)))
             continue
         alive += 1
         if name == TAVILY:
@@ -719,7 +764,7 @@ async def run(args) -> tuple[str, int]:
         stats.append(f"{name}: {len(entries)}")
 
     if not alive:
-        listed = "\n".join(f"{name}: {reason}" for name, reason in failures)
+        listed = "\n".join(f"{f.source}: {f.reason}" for f in failures)
         return f"{listed}\nпрокси: {args.proxy_note}", 3
 
     merged = merge(groups, make_canonicalizer())
@@ -735,7 +780,13 @@ async def run(args) -> tuple[str, int]:
             "proxy": args.proxy_note,
             "engines": engines_note,
             "entries": [vars(entry) for entry in merged],
-            "failures": [{"source": name, "reason": reason} for name, reason in failures],
+            "failures": [
+                {"source": f.source, "reason": f.reason} for f in failures
+            ],
+            "blocked": [
+                {"url": f.source, "reason": f.reason}
+                for f in browser_candidates(failures)
+            ],
             "social": social_block,
         }
         return json.dumps(payload, ensure_ascii=False, indent=2), 0

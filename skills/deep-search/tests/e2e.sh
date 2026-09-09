@@ -197,6 +197,9 @@ grep -q '10.0.0.1' "$OUT/t12.md" && grep -q '169.254.169.254' "$OUT/t12.md"
 check ssrf "оба URL названы в отказах" $?
 grep -q 'example.com' "$OUT/t12.md"; check ssrf "публичный URL прошёл" $?
 grep -q '^прокси: http' "$OUT/t12.md"; check ssrf "localhost не проксируется" $?
+# A vetoed address must never be offered to the browser retry block.
+sed -n '/Заблокировано, добрать браузером/,/^### /p' "$OUT/t12.md" | grep -qE '10\.0\.0\.1|169\.254\.169\.254'
+check ssrf "приватные URL не предлагаются браузеру" $([ $? = 1 ] && echo 0 || echo 1)
 
 echo "== 13. proxy on by default (stub) =="
 code=$(runs t13.md "Claude Code hooks" --only searxng --social --max-results 2)

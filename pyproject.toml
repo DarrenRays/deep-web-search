@@ -17,5 +17,5 @@ dev = [
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
-pythonpath = ["lib"]
+pythonpath = ["lib", "skills/deep-search/scripts"]
 testpaths = ["tests"]

@@ -1,7 +1,11 @@
 ---
 name: deep-search
 description: Full web research through two sources at once — Tavily+Jina and self-hosted SearXNG+Crawl4AI — run in parallel, deduplicated by URL, reported as one document. Use it when coverage and cross-checking matter: comparing sources, a disputed or fresh fact, changelogs and release notes, market overviews, "collect everything there is on X", plus an optional social media block. This is the only web search route: the Tavily+Jina script lives inside the skill as branch A. By default it collects 50 sources per branch and reads 10 of them in full. For a quick question use the same skill with `--only tavily --max-results 5 --full-pages 3`.
-allowed-tools: Bash(~/.claude/skills/deep-search/scripts/deep_search.py *)
+allowed-tools:
+  - Bash(~/.claude/skills/deep-search/scripts/deep_search.py *)
+  - mcp__playwright__browser_navigate
+  - mcp__playwright__browser_evaluate
+  - mcp__playwright__browser_close
 ---
 
 # Deep Search Skill
@@ -95,7 +99,44 @@ Then two tiers:
    reading a specific one next.
 
 If a first-tier page does not open (Cloudflare, empty HTML), the next one on the
-list takes its place — one refill, so the tier does not thin out.
+list takes its place — one refill, so the tier does not thin out. The page that
+refused the crawler is not lost: it moves to the browser block below.
+
+Two more sections can follow: `### Заблокировано, добрать браузером` and
+`### Не удалось получить`. With `--social`, the social block is last.
+
+## Blocked pages: finish them with the browser
+
+`### Заблокировано, добрать браузером (N)` lists pages that a live site served
+to a human but not to the crawler — a Cloudflare challenge, HTTP 403/429, or a
+body that held no text. At most three, in report order. These are exactly the
+pages worth having: the crawler reached the site, the site refused it.
+
+When the block is present and a Playwright MCP is configured, read those pages
+before answering:
+
+1. `mcp__playwright__browser_navigate` with the URL;
+2. `mcp__playwright__browser_evaluate` with
+   `() => document.body.innerText`, then keep at most `--max-chars-per-page`
+   characters (4000 by default);
+3. after the last one, `mcp__playwright__browser_close`.
+
+Rules:
+
+- take URLs from this block only. Addresses under `### Не удалось получить` were
+  vetoed by the SSRF check or do not resolve — opening those in a browser is the
+  request the veto exists to prevent;
+- if the text is still the challenge itself (`Just a moment`, `Enable
+  JavaScript`, `Verify you are human`), stop at one attempt and say in the answer
+  that the site is closed to the browser as well;
+- skip the whole step when the user asked for something quick (`--only tavily`,
+  "in two words") or when the first tier already answers the question;
+- say which sources were read with the browser, the same way you cite the rest;
+- the browser runs as the user, with their IP and their cookies: navigate and
+  read, never log in, submit or buy anything.
+
+Without a Playwright MCP, nothing breaks — those pages just stay unread, and the
+answer says so.
 
 ## Choosing flags from how the request is phrased
 
@@ -140,7 +181,7 @@ keeps working, and the exit code stays `0`. An empty list is never printed as
 | `searxng+crawl4ai — CRAWL4AI_API_TOKEN не задан` | add the token to the environment or to `<repo>/.env` |
 | `searxng+crawl4ai — SearXNG вернул 0 результатов; движки: …` | rare with `--engines auto`: a pool of 52 engines survives a CAPTCHA on the main four. If it is still zero — wait, or use `--engines builtin` |
 | `N ссыл(ок) от мусорных движков — домен не резолвится` | normal for a wide pool: some engines return link farms, and those are dropped before crawling |
-| `Blocked by anti-bot protection: Cloudflare JS challenge` | the site is closed to the crawler; the text usually arrives through `tavily+jina` — Jina fetches the page from its own side |
+| `Blocked by anti-bot protection: Cloudflare JS challenge` | the site is closed to the crawler; the URL moves to the browser block — reopen it with Playwright. `tavily+jina` sometimes brings the text anyway, since Jina fetches from its own side |
 | `прокси: … недоступен, работаю напрямую` | the proxy container is down; bring it up or live with it — mastodon and reddit will end up in the failures |
 | `ConnectError` on 8880/11235 | run `docker compose up -d` in the stack directory |
 
