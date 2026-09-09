@@ -1,0 +1,72 @@
+name: internet-claude
+
+services:
+  searxng:
+    image: searxng/searxng:latest
+    container_name: searxng
+    restart: unless-stopped
+    networks: [internet-net]
+    ports:
+      - "127.0.0.1:${SEARXNG_PORT:-8880}:8080"
+    volumes:
+      # The entrypoint chowns this path, so mount the directory, not the file.
+      - ./searxng:/etc/searxng:rw
+      - searxng-cache:/var/cache/searxng
+    cap_drop: [ALL]
+    cap_add: [CHOWN, SETGID, SETUID]
+    logging:
+      driver: json-file
+      options: {max-size: "10m", max-file: "3"}
+
+  crawl4ai:
+    image: unclecode/crawl4ai:latest
+    container_name: crawl4ai
+    restart: unless-stopped
+    networks: [internet-net]
+    ports:
+      - "127.0.0.1:${CRAWL4AI_PORT:-11235}:11235"
+    environment:
+      CRAWL4AI_API_TOKEN: ${CRAWL4AI_API_TOKEN:?set CRAWL4AI_API_TOKEN in .env}
+    # Chromium crashes on heavy pages with the default 64MB /dev/shm.
+    shm_size: 1g
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:11235/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 40s
+
+  searxng-mcp:
+    build:
+      context: .
+      dockerfile: mcp-server/Dockerfile
+    container_name: searxng-mcp
+    restart: unless-stopped
+    networks: [internet-net]
+    ports:
+      - "127.0.0.1:${MCP_PORT:-8765}:8765"
+    environment:
+      SEARXNG_URL: http://searxng:8080
+      CRAWL4AI_URL: http://crawl4ai:11235
+      CRAWL4AI_API_TOKEN: ${CRAWL4AI_API_TOKEN:?set CRAWL4AI_API_TOKEN in .env}
+      MCP_HOST: 0.0.0.0
+      MCP_PORT: 8765
+      SOCIAL_REDDIT_SUBREDDITS: ${SOCIAL_REDDIT_SUBREDDITS:-}
+      SOCIAL_TELEGRAM_CHANNELS: ${SOCIAL_TELEGRAM_CHANNELS:-}
+      SOCIAL_MASTODON_INSTANCES: ${SOCIAL_MASTODON_INSTANCES:-}
+      SOCIAL_RSS_FEEDS: ${SOCIAL_RSS_FEEDS:-}
+      BLUESKY_IDENTIFIER: ${BLUESKY_IDENTIFIER:-}
+      BLUESKY_APP_PASSWORD: ${BLUESKY_APP_PASSWORD:-}
+      YOUTUBE_API_KEY: ${YOUTUBE_API_KEY:-}
+    depends_on:
+      searxng:
+        condition: service_started
+      crawl4ai:
+        condition: service_healthy
+
+networks:
+  internet-net:
+    driver: bridge
+
+volumes:
+  searxng-cache:

@@ -1,0 +1,18 @@
+# Read the documentation before extending the defaults:
+# https://docs.searxng.org/admin/settings/
+
+use_default_settings: true
+
+server:
+  secret_key: "ultrasecretkey"
+  image_proxy: true
+  # JSON clients do not send browser headers; the limiter would reject them.
+  # Safe here because the port is bound to 127.0.0.1 only.
+  limiter: false
+
+search:
+  formats:
+    - html
+    - json
+  default_lang: "ru"
+  safe_search: 0

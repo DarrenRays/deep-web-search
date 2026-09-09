@@ -1,0 +1,22 @@
+[project]
+name = "searxng-crawl-mcp"
+version = "0.1.0"
+description = "MCP server joining SearXNG search, Crawl4AI page extraction and federated social search"
+requires-python = ">=3.12"
+dependencies = [
+    "mcp==2.0.0",
+    "httpx>=0.28",
+    "selectolax>=0.3.21",
+    "defusedxml>=0.7.1",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3",
+    "pytest-asyncio>=0.24",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+pythonpath = ["mcp-server"]
+testpaths = ["tests"]
