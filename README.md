@@ -1,5 +1,7 @@
 # deep-search-stack
 
+*[Русская версия](README.ru.md)*
+
 Self-hosted web research for Claude Code, plus the skill that drives it. One
 query fans out to two independent stacks at once and comes back as a single
 merged report.
@@ -39,9 +41,6 @@ you want `search_and_scrape` or `social_search` as a normal tool call.
 | `skills/deep-search/` | the skill: `SKILL.md`, `scripts/deep_search.py`, `tests/e2e.sh` |
 | `skills/custom-search/` | the `tavily+jina` branch, run as a subprocess by the skill |
 | `scripts/install-skills.sh` | links both skills into `~/.claude/skills` |
-
-`skills/*/SKILL.md` is written in Russian — that is the interface the skill's
-author reads. Everything else here is English.
 
 ## Setup
 
@@ -90,6 +89,54 @@ rest as one line each with title, URL, engine and snippet, so you can ask for a
 specific one to be read next. Both branches down is exit code `3` with the
 reasons on stderr; one branch down is reported in the header and the other still
 answers.
+
+## Calling it from Claude Code
+
+Three ways in, same script underneath:
+
+| Way | What it does |
+|---|---|
+| `/deep-search python 3.14 release notes` | explicit call, the query is everything after the command |
+| ask normally — "find out what people say about X" | the skill's description matches and Claude runs it on its own |
+| the `bash` line above | no Claude at all; the report goes to stdout |
+
+`/custom-search` is the manual single-source route: Tavily plus Jina only, no
+SearXNG. It is disabled for auto-invocation on purpose, so Claude will not pick
+it over `deep-search`.
+
+Flags can be named in plain words, and the skill maps them itself: "quick look"
+becomes `--only tavily --max-results 5 --full-pages 3`, "dig up everything"
+becomes `--max-results 80 --full-pages 20`, "only this week" becomes
+`--time-range week`, "what's on social media" adds `--social`.
+
+## Answer language
+
+Two independent settings — what gets searched, and what you get written back.
+
+**What is searched** is `--language`, passed to SearXNG:
+
+```bash
+# the Russian-language web only
+~/.claude/skills/deep-search/scripts/deep_search.py "тарифы на электричество" --language ru
+
+# the English-language web only
+~/.claude/skills/deep-search/scripts/deep_search.py "electricity tariffs" --language en
+```
+
+The default is `all` — both, mixed. Narrow it when the answer depends on
+regional sources: prices, laws, local services.
+
+**What is written back** is decided in the request, not by a flag. Claude
+answers in the language you asked in; to override, say so in the prompt:
+
+```
+/deep-search Crawl4AI vs Firecrawl — ответь по-русски
+/deep-search тарифы на электричество в Москве --language ru, answer in English
+```
+
+The report skeleton the script prints — the header, `## Ещё источники`,
+`### Не удалось получить` — is Russian regardless. Page text arrives in whatever
+language the page is written in; Claude translates as needed when it answers.
 
 ## Environment
 
@@ -209,3 +256,7 @@ test run cannot drift apart.
 - Adding a social platform is one class in `mcp-server/sources.py` with `name`,
   `unavailable` and `async search(spec)`, plus one entry in `build_sources`.
   Nothing in the aggregator or the tools changes.
+
+## License
+
+MIT — see [LICENSE](LICENSE).
