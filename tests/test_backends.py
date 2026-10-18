@@ -199,3 +199,150 @@ async def test_crawl_sends_the_pruning_markdown_generator():
         params["markdown_generator"]["params"]["content_filter"]["type"]
         == "PruningContentFilter"
     )
+
+
+ARTICLE = (
+    "<html><head><title>Readable</title></head><body><article><h1>Heading</h1><p>"
+    + "A sentence of real article text that trafilatura keeps. " * 20
+    + "</p></article></body></html>"
+)
+
+
+@pytest.fixture
+def public_only(monkeypatch):
+    import backends
+
+    def vet(url):
+        return "resolves to a private or unroutable address" if "127.0.0.1" in url else None
+
+    monkeypatch.setattr(backends, "rejection_reason", vet)
+
+
+async def test_reader_extracts_text_and_title_with_browser_headers(public_only):
+    from backends import Reader
+
+    async def handler(request):
+        assert "Chrome/" in request.headers["user-agent"]
+        return httpx.Response(200, headers={"content-type": "text/html"}, text=ARTICLE)
+
+    async with client_returning(handler) as client:
+        [page] = await Reader(client).read(["https://example.com/a"])
+
+    assert page.error is None
+    assert page.title == "Readable"
+    assert "real article text" in page.markdown
+
+
+async def test_reader_follows_a_public_redirect(public_only):
+    from backends import Reader
+
+    async def handler(request):
+        if request.url.path == "/old":
+            return httpx.Response(301, headers={"location": "/new"})
+        return httpx.Response(200, headers={"content-type": "text/html"}, text=ARTICLE)
+
+    async with client_returning(handler) as client:
+        [page] = await Reader(client).read(["https://example.com/old"])
+
+    assert page.error is None
+    assert page.url == "https://example.com/old"
+
+
+async def test_reader_refuses_a_redirect_into_localhost(public_only):
+    from backends import Reader
+
+    seen = []
+
+    async def handler(request):
+        seen.append(str(request.url))
+        return httpx.Response(302, headers={"location": "http://127.0.0.1:11235/admin"})
+
+    async with client_returning(handler) as client:
+        [page] = await Reader(client).read(["https://example.com/"])
+
+    assert "отклонён" in page.error
+    assert seen == ["https://example.com/"]
+
+
+async def test_reader_reports_status_and_non_html(public_only):
+    from backends import Reader
+
+    async def handler(request):
+        if request.url.path == "/blocked":
+            return httpx.Response(403, text="no")
+        return httpx.Response(200, headers={"content-type": "application/pdf"}, content=b"%PDF")
+
+    async with client_returning(handler) as client:
+        blocked, pdf = await Reader(client).read(
+            ["https://example.com/blocked", "https://example.com/doc.pdf"]
+        )
+
+    assert blocked.error == "HTTP 403"
+    assert pdf.error == "не HTML: application/pdf"
+
+
+async def test_reader_names_a_page_without_text(public_only):
+    from backends import Reader
+
+    async def handler(request):
+        return httpx.Response(
+            200, headers={"content-type": "text/html"}, text="<html><body><div id=app></div></body></html>"
+        )
+
+    async with client_returning(handler) as client:
+        [page] = await Reader(client).read(["https://example.com/spa"])
+
+    assert page.error == "page had no text content"
+
+
+async def test_reader_tries_ru_zone_direct_first_and_falls_back(public_only):
+    from backends import Reader
+
+    seen = []
+
+    def answering(name, status):
+        async def handler(request):
+            seen.append((name, request.url.host))
+            if status != 200:
+                return httpx.Response(status, text="no")
+            return httpx.Response(200, headers={"content-type": "text/html"}, text=ARTICLE)
+
+        return client_returning(handler)
+
+    async with answering("proxy", 200) as proxied, answering("direct", 403) as direct:
+        ru, com = await Reader(proxied, direct).read(
+            ["https://www.avito.ru/x", "https://example.com/x"]
+        )
+
+    assert ru.error is None and com.error is None
+    # .ru: direct first, refused, then the proxy. .com: the proxy only.
+    assert seen.count(("direct", "www.avito.ru")) == 1
+    assert seen.count(("proxy", "www.avito.ru")) == 1
+    assert ("direct", "example.com") not in seen
+
+
+async def test_reader_names_both_exits_when_both_fail(public_only):
+    from backends import Reader
+
+    async def refuse(request):
+        return httpx.Response(403, text="no")
+
+    async with client_returning(refuse) as proxied, client_returning(refuse) as direct:
+        [page] = await Reader(proxied, direct).read(["https://example.com/"])
+
+    assert page.error == "HTTP 403; HTTP 403"
+
+
+def test_crawl_error_keeps_the_playwright_line():
+    from backends import _crawl_error
+
+    message = (
+        "Unexpected error in _crawl_web at line 779\nError: Failed on navigating ACS-GOTO:\n"
+        "Page.goto: net::ERR_CONNECTION_CLOSED at https://x.example/\nCall log:\n  - navigating\n"
+        "Code context:\n 774   tag='GOTO'"
+    )
+    assert _crawl_error(message) == "Page.goto: net::ERR_CONNECTION_CLOSED at https://x.example/"
+    assert _crawl_error("Blocked by anti-bot protection: Cloudflare JS challenge") == (
+        "Blocked by anti-bot protection: Cloudflare JS challenge"
+    )
+    assert _crawl_error("") == ""

@@ -2,40 +2,42 @@
 
 *[Русская версия](README.ru.md)*
 
-Self-hosted web research for Claude Code, plus the skill that drives it. One
-query fans out to two independent stacks at once and comes back as a single
-merged report.
+Self-hosted web research for Claude Code, plus the skill that drives it. No paid
+APIs: one query fans out to two SearXNG instances at once, and the top links are
+read in full and come back as a single merged report.
 
-| Branch | How it searches | Costs |
+| Step | What does it | Costs |
 |---|---|---|
-| `tavily+jina` | Tavily search, Jina Reader for page text | paid API keys |
-| `searxng+crawl4ai` | self-hosted SearXNG, Crawl4AI for page text | nothing, runs locally |
+| search | two SearXNG instances, each leaving through a different exit | nothing, runs locally |
+| read | trafilatura over plain HTTP, Crawl4AI (Chromium) when that gets no text, a real Chrome for sites with bot protection | nothing, runs locally |
 
-Results are merged by URL. A page found by both branches is reported first and
-labelled with both sources — that is the cross-check the two branches exist for.
+Results are merged by URL. A link found by both instances is read first and
+labelled with both sources. CAPTCHA budgets are per IP, so two exits keep the
+search answering when one IP is under a challenge wave.
 
 ```
 Claude Code
    │
-   └── skill deep-search ──┬──> tavily_jina.py ──> Tavily + Jina
-                           │
-                           └──> imports lib/ ──┬──> searxng :8880
-                                               └──> crawl4ai :11235
+   └── skill deep-search ── imports lib/ ──┬──> searxng   :8880
+                                           ├──> searxng-b :8881
+                                           ├──> trafilatura (in process)
+                                           ├──> crawl4ai  :11235 ── crawl4ai-egress (tun2socks)
+                                           └──> Chrome via patchright (in process)
 ```
 
 One process, no server in between: the skill imports the HTTP clients as a
-library and calls the two containers itself. Nothing is loaded into the model's
+library and calls the containers itself. Nothing is loaded into the model's
 context until the skill is called.
 
 ## Layout
 
 | Path | Holds |
 |---|---|
-| `docker-compose.yml` | the two services: SearXNG and Crawl4AI |
-| `lib/` | HTTP clients, URL vetting, social adapters — imported by the skill |
+| `docker-compose.yml` | the services: two SearXNG, Crawl4AI and its egress sidecar |
+| `lib/` | HTTP clients, the page reader, the browser step, URL vetting, social adapters — imported by the skill |
 | `tests/` | tests for `lib/`, `httpx.MockTransport`, no network |
-| `searxng/settings.yml.example` | SearXNG config template |
-| `skills/deep-search/` | the skill: `SKILL.md`, `scripts/deep_search.py`, `scripts/tavily_jina.py`, `tests/e2e.sh` |
+| `searxng/settings.yml.example`, `searxng-b/settings.yml.example` | SearXNG config templates |
+| `skills/deep-search/` | the skill: `SKILL.md`, `scripts/deep_search.py`, `tests/e2e.sh` |
 | `scripts/install-skills.sh` | links the skill into `~/.claude/skills` |
 
 ## Setup
@@ -43,11 +45,23 @@ context until the skill is called.
 ```bash
 cp .env.example .env          # fill in CRAWL4AI_API_TOKEN: openssl rand -hex 32
 cp searxng/settings.yml.example searxng/settings.yml
-                              # replace ultrasecretkey: openssl rand -hex 32
-docker compose up -d          # searxng and crawl4ai
+cp searxng-b/settings.yml.example searxng-b/settings.yml
+                              # replace ultrasecretkey in both: openssl rand -hex 32
+docker compose up -d          # two searxng, crawl4ai and its egress sidecar
 ```
 
-Both `.env` and the real `settings.yml` are gitignored because they hold
+Give the two SearXNG instances different exits — `outgoing.proxies` in one
+`settings.yml` and not the other, or two different proxies. With the same exit
+the second instance only adds load.
+
+Crawl4AI's traffic leaves through `crawl4ai-egress`, a tun2socks sidecar. By
+default it goes out directly; set `CRAWL4AI_EGRESS_PROXY` (for example
+`socks5://host.docker.internal:1081`) to route the browser through a proxy
+without putting the whole Docker VM behind a VPN. Crawl4AI ignores proxy
+settings of its own: its Chromium is pinned to a built-in SSRF-guarding forward
+proxy that dials the target itself.
+
+Both `.env` and the real `settings.yml` files are gitignored because they hold
 secrets.
 
 Install the skill and point it at this checkout:
@@ -60,27 +74,28 @@ uv sync                               # the venv the skill re-execs into
 The skill finds `lib/`, `.venv` and `.env` by resolving its own path back to
 this checkout, symlink included — there is no path variable to set.
 
-That is the whole requirement: two containers, one venv, one symlink.
+That is the whole requirement: four containers, one venv, one symlink.
 
-Recommended on top of that — a Playwright MCP, so Claude can open the pages that
-refuse the crawler:
+Optional on top of that — a Playwright MCP, for the rare page the built-in
+browser step could not open:
 
 ```bash
 claude mcp add playwright npx @playwright/mcp@latest
 ```
 
-Without it the skill works exactly as before; blocked pages simply stay unread.
+The built-in step needs Google Chrome, or the bundled Chromium:
+`uv run python -m patchright install chromium`.
 See [Blocked pages](#blocked-pages) below.
 
 ## Using the skill
 
 ```bash
-# 50 sources per branch, 10 read in full
+# 50 links per instance, 10 read in full
 ~/.claude/skills/deep-search/scripts/deep_search.py "Crawl4AI vs Firecrawl"
 
-# quick, one branch
+# quick
 ~/.claude/skills/deep-search/scripts/deep_search.py "python 3.14 release" \
-    --only searxng --max-results 5 --full-pages 3
+    --max-results 10 --full-pages 3
 
 # research plus what people are posting
 ~/.claude/skills/deep-search/scripts/deep_search.py "Claude Code hooks" --social
@@ -91,15 +106,26 @@ behaviour are in [`skills/deep-search/SKILL.md`](skills/deep-search/SKILL.md).
 
 Output comes in two tiers: the pages read in full, then `## Ещё источники` — the
 rest as one line each with title, URL, engine and snippet, so you can ask for a
-specific one to be read next. Both branches down is exit code `3` with the
-reasons on stderr; one branch down is reported in the header and the other still
-answers.
+specific one to be read next. Both instances down is exit code `3` with the
+reasons on stderr; one instance down is reported in the failures and the other
+still answers.
 
 ## Blocked pages
 
-Sites that serve a Cloudflare challenge, answer HTTP 403/429 or return a body
-with no text are not dropped from the report. They go into their own section,
-capped at three per run:
+Pages refused by both trafilatura and Crawl4AI — a Cloudflare challenge, HTTP
+403/429, an empty body — are reopened in the system Chrome, driven by
+[patchright](https://github.com/Kaliiiiiiiiii-Vinyzu/patchright-python), up to
+three per run. The window opens off-screen, not headless: ozon.ru serves a stub
+to headless Chrome and the catalogue to a window. Each page is tried from two
+exits, chosen by the host's zone — `.ru`-zone sites refuse foreign IPs, foreign
+sites are throttled on the direct route here. avito.ru, ozon.ru and
+Cloudflare-challenged pages read in full this way.
+
+Out of reach: IP rate limits (Avito closes after a few visits in a row) and
+CAPTCHAs that want a human. Those end up in `### Не удалось получить`.
+
+When no browser could start, or with `--no-browser`, the pages go into their own
+section instead, for Claude to finish with a Playwright MCP:
 
 ```
 ### Заблокировано, добрать браузером (2)
@@ -107,16 +133,10 @@ capped at three per run:
 - https://example.com/b — page had no text content
 ```
 
-The script cannot open them itself — it is a plain subprocess, and MCP tools are
-called by the model. So the section is an instruction to Claude: navigate to each
-URL with the Playwright MCP, read `document.body.innerText`, close the browser.
-`skills/deep-search/SKILL.md` spells out the procedure and its limits.
-
-Addresses that failed the SSRF check or did not resolve stay in
-`### Не удалось получить` and are never offered to the browser — that separation
-is the point of the split, and `tests/test_report.py` pins it.
-
-With `--json`, the same list comes back as `blocked[]`.
+`skills/deep-search/SKILL.md` spells out that procedure and its limits.
+Addresses that failed the SSRF check or did not resolve are never offered to
+any browser, and the built-in one vets every navigation, redirects included.
+With `--json`, the list comes back as `blocked[]`.
 
 ## Calling it from Claude Code
 
@@ -129,7 +149,7 @@ Three ways in, same script underneath:
 | the `bash` line above | no Claude at all; the report goes to stdout |
 
 Flags can be named in plain words, and the skill maps them itself: "quick look"
-becomes `--only tavily --max-results 5 --full-pages 3`, "dig up everything"
+becomes `--max-results 10 --full-pages 3`, "dig up everything"
 becomes `--max-results 80 --full-pages 20`, "only this week" becomes
 `--time-range week`, "what's on social media" adds `--social`.
 
@@ -166,12 +186,12 @@ language the page is written in; Claude translates as needed when it answers.
 
 | Variable | For |
 |---|---|
-| `CRAWL4AI_API_TOKEN` | required; Crawl4AI demands it on every endpoint |
-| `SEARXNG_PORT`, `CRAWL4AI_PORT` | host ports, bound to `127.0.0.1` only |
-| `TAVILY_API_KEY_1..3`, `JINA_API_KEY` | branch `tavily+jina` |
+| `CRAWL4AI_API_TOKEN` | Crawl4AI demands it on every endpoint; without it only the trafilatura reader runs |
+| `SEARXNG_PORT`, `SEARXNG_B_PORT`, `CRAWL4AI_PORT` | host ports, bound to `127.0.0.1` only |
+| `CRAWL4AI_EGRESS_PROXY` | where Crawl4AI's traffic leaves, a tun2socks proxy URL; default `direct://` |
 | `DEEP_SEARCH_DIR` | path to the checkout; only needed if the skill was copied out of it instead of symlinked |
-| `DEEP_SEARCH_PROXY` | proxy for external requests, default `http://127.0.0.1:8118`, empty = direct |
-| `DEEP_SEARCH_SEARXNG_URL`, `DEEP_SEARCH_CRAWL4AI_URL` | full URLs when the services are not on the default local ports |
+| `DEEP_SEARCH_PROXY` | proxy for page reads and social sources, default `http://127.0.0.1:8118`, empty = direct |
+| `DEEP_SEARCH_SEARXNG_URL`, `DEEP_SEARCH_SEARXNG_B_URL`, `DEEP_SEARCH_CRAWL4AI_URL` | full URLs when the services are not on the default local ports |
 | `SOCIAL_*`, `BLUESKY_*`, `YOUTUBE_API_KEY` | optional social sources, see `.env.example` |
 
 The proxy default assumes something listening on `127.0.0.1:8118` (Privoxy or
@@ -228,9 +248,10 @@ research tool to be wrong.
 `lib/sanitize.py` resolves every URL and refuses private, loopback, link-local
 and reserved addresses. The URLs come from search engines and, indirectly, from
 a model's phrasing of a query, so without that check the crawler could be
-pointed at the Docker host and at cloud metadata endpoints. Branch B runs every
-hit through it before Crawl4AI sees the URL; a rejected one is reported with its
-reason.
+pointed at the Docker host and at cloud metadata endpoints. Every hit goes
+through it before either reader sees the URL; a rejected one is reported with
+its reason. The trafilatura reader follows redirects by hand and vets every hop
+the same way, so a public page cannot bounce the request to `127.0.0.1`.
 
 ## Development
 
@@ -242,9 +263,10 @@ DEEP_SEARCH_SCRIPT="$PWD/skills/deep-search/scripts/deep_search.py" \
     bash skills/deep-search/tests/e2e.sh
 ```
 
-The e2e suite covers 18 scenarios: each branch alone and together, dedup, the
-social block, both degradations, exit code 3, the output budget, JSON,
-`--time-range`, the venv re-exec, the SSRF veto, proxy default, dead-proxy
+The e2e suite covers each instance alone and both together, dedup, the social
+block, one instance down, exit code 3, the output budget, JSON, `--time-range`,
+the venv re-exec, the SSRF veto, the two readers, the browser step against live
+Cloudflare and Avito pages, `--no-browser`, proxy default, dead-proxy
 fallback and `--no-proxy`. Do not run it back to back — a burst of queries makes
 SearXNG's engines serve CAPTCHAs.
 

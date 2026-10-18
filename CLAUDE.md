@@ -12,7 +12,8 @@ and imports them as a library — there is no server process in between.
 
 | Module | Holds |
 |---|---|
-| `backends.py` | HTTP clients for SearXNG and Crawl4AI |
+| `backends.py` | HTTP clients for SearXNG and Crawl4AI, the trafilatura page reader |
+| `browser.py` | Last-resort reader: system Chrome via patchright, exit chosen by host zone |
 | `sanitize.py` | URL vetting against SSRF, output trimming |
 | `sources.py` | One adapter per social platform |
 | `social.py` | `Post`, `QuerySpec`, dedupe, ranking, rendering |
@@ -24,8 +25,7 @@ by `scripts/install-skills.sh`.
 
 | Path | Holds |
 |---|---|
-| `skills/deep-search/scripts/deep_search.py` | both branches, merge, tiered report; finds `lib/`, `.venv` and `.env` from its own path |
-| `skills/deep-search/scripts/tavily_jina.py` | branch `tavily+jina`, run as a subprocess by the skill |
+| `skills/deep-search/scripts/deep_search.py` | both SearXNG instances, merge, page reads, tiered report; finds `lib/`, `.venv` and `.env` from its own path |
 | `skills/deep-search/tests/e2e.sh` | 18 scenarios against a stub SearXNG; `DEEP_SEARCH_SCRIPT` points it at a checkout |
 
 ## Conventions

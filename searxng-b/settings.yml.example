@@ -1,0 +1,21 @@
+# Second SearXNG instance. Same settings as searxng/, except where its engines
+# leave the machine: give this one a different exit than the first (no
+# `outgoing.proxies` if the first goes through a proxy, or another proxy), so a
+# CAPTCHA wave on one IP leaves the other instance answering.
+# https://docs.searxng.org/admin/settings/settings_outgoing.html
+
+use_default_settings: true
+
+server:
+  secret_key: "ultrasecretkey"
+  image_proxy: true
+  # JSON clients do not send browser headers; the limiter would reject them.
+  # Safe here because the port is bound to 127.0.0.1 only.
+  limiter: false
+
+search:
+  formats:
+    - html
+    - json
+  default_lang: "ru"
+  safe_search: 0

@@ -78,13 +78,163 @@ def test_vetoed_addresses_never_reach_the_browser_block():
 
 
 def test_no_blocked_section_without_candidates():
-    assert "Заблокировано" not in report([Failure("tavily+jina", "no keys")])
+    assert "Заблокировано" not in report([Failure("searxng-b", "ConnectError")])
 
 
-def test_only_http_urls_reach_the_reader():
-    from tavily_jina import normalize_with_jina
+class FakeReader:
+    def __init__(self, errors):
+        self.errors = errors
 
-    for url in ("file:///etc/passwd", "ftp://example.com/x", "gopher://example.com"):
-        result = normalize_with_jina(url, "key", timeout=1, max_chars=10)
-        assert result["ok"] is False
-        assert "scheme" in result["error"]
+    async def read(self, urls):
+        from backends import PageResult
+
+        return [
+            PageResult(url, "", "", error=self.errors[url])
+            if url in self.errors
+            else PageResult(url, "t", f"text of {url}")
+            for url in urls
+        ]
+
+
+class FakeCrawler:
+    def __init__(self, errors):
+        self.errors = errors
+        self.asked = []
+
+    async def crawl(self, urls, *, cache_mode):
+        from backends import PageResult
+
+        self.asked.extend(urls)
+        return [
+            PageResult(url, "", "", error=self.errors[url])
+            if url in self.errors
+            else PageResult(url, "crawled", f"rendered {url}")
+            for url in urls
+        ]
+
+
+def entries(*urls):
+    return [Entry(url=url, title=url, text="") for url in urls]
+
+
+async def test_only_what_trafilatura_missed_goes_to_crawl4ai():
+    from deep_search import _read_batch
+
+    batch = entries("https://a.example/", "https://spa.example/")
+    crawler = FakeCrawler({})
+    failures = await _read_batch(
+        FakeReader({"https://spa.example/": "page had no text content"}),
+        crawler, "", batch, "enabled",
+    )
+
+    assert failures == []
+    assert crawler.asked == ["https://spa.example/"]
+    assert batch[0].text == "text of https://a.example/"
+    assert batch[1].text == "rendered https://spa.example/"
+    assert batch[1].title == "crawled"
+
+
+async def test_a_page_both_readers_miss_names_both_reasons():
+    from deep_search import _read_batch
+
+    url = "https://cf.example/"
+    failures = await _read_batch(
+        FakeReader({url: "HTTP 403"}),
+        FakeCrawler({url: "Blocked by anti-bot protection: Cloudflare JS challenge"}),
+        "", entries(url), "enabled",
+    )
+
+    [failure] = failures
+    assert failure.source == url
+    assert "Cloudflare" in failure.reason and "trafilatura: HTTP 403" in failure.reason
+    assert failure.retryable
+
+
+async def test_missing_crawler_is_named_per_page():
+    from deep_search import _read_batch
+
+    url = "https://spa.example/"
+    failures = await _read_batch(
+        FakeReader({url: "page had no text content"}),
+        None, "CRAWL4AI_API_TOKEN не задан", entries(url), "enabled",
+    )
+
+    assert failures[0].reason.startswith("CRAWL4AI_API_TOKEN не задан")
+
+
+async def test_browser_reads_what_both_readers_were_refused(monkeypatch):
+    import deep_search
+    from backends import PageResult
+
+    asked = {}
+
+    class FakeBrowser:
+        class BrowserUnavailable(RuntimeError):
+            pass
+
+        @staticmethod
+        async def read(urls, proxy):
+            asked["urls"] = urls
+            return [
+                PageResult(urls[0], "From browser", "browser text"),
+                PageResult(urls[1], "", "", error="страница-заглушка антибота"),
+            ]
+
+    monkeypatch.setattr(deep_search, "_stack_modules", lambda *names: [FakeBrowser])
+    wanted = entries("https://a.example/", "https://b.example/", "https://ssrf.example/")
+    failures = [
+        Failure("https://a.example/", "HTTP 403", retryable=True),
+        Failure("https://b.example/", "Cloudflare", retryable=True),
+        Failure("https://ssrf.example/", "resolves to a private or unroutable address"),
+    ]
+
+    left = await deep_search._browser_pass(wanted, failures)
+
+    assert asked["urls"] == ["https://a.example/", "https://b.example/"]
+    assert wanted[0].text == "browser text" and wanted[0].engine == "браузер"
+    assert [f.source for f in left] == ["https://b.example/", "https://ssrf.example/"]
+    assert not left[0].retryable and "браузер — страница-заглушка" in left[0].reason
+
+
+async def test_no_browser_keeps_the_candidates_for_the_model(monkeypatch):
+    import deep_search
+
+    class NoBrowser:
+        class BrowserUnavailable(RuntimeError):
+            pass
+
+        @staticmethod
+        async def read(urls, proxy):
+            raise NoBrowser.BrowserUnavailable("patchright не установлен (uv sync)")
+
+    monkeypatch.setattr(deep_search, "_stack_modules", lambda *names: [NoBrowser])
+    failures = [Failure("https://a.example/", "HTTP 403", retryable=True)]
+
+    left = await deep_search._browser_pass(entries("https://a.example/"), failures)
+
+    assert left[0].retryable
+    assert left[-1].source == "браузер" and "patchright" in left[-1].reason
+
+
+async def test_a_proxy_error_still_earns_a_browser_try():
+    from deep_search import _read_batch
+
+    url = "https://www.avito.ru/x"
+    [failure] = await _read_batch(
+        FakeReader({url: "ProxyError: 503 Service Unavailable"}),
+        None, "CRAWL4AI_API_TOKEN не задан", entries(url), "enabled",
+    )
+
+    assert failure.retryable
+
+
+async def test_a_non_html_file_is_not_sent_to_the_browser():
+    from deep_search import _read_batch
+
+    url = "https://example.com/doc.pdf"
+    [failure] = await _read_batch(
+        FakeReader({url: "не HTML: application/pdf"}),
+        FakeCrawler({url: "HTTP 200 but not html"}), "", entries(url), "enabled",
+    )
+
+    assert not failure.retryable

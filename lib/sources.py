@@ -16,7 +16,7 @@ from typing import Protocol
 
 import httpx
 from defusedxml.ElementTree import fromstring as defused_fromstring
-from selectolax.parser import HTMLParser
+from selectolax.lexbor import LexborHTMLParser
 
 from backends import Searxng
 from social import Post, QuerySpec, epoch_to_utc, iso_to_utc, within_window
@@ -63,7 +63,7 @@ def _split_env(name: str) -> list[str]:
 
 
 def _text_of(html: str) -> str:
-    return HTMLParser(html).text(separator=" ", strip=True)
+    return LexborHTMLParser(html).text(separator=" ", strip=True)
 
 
 def _child_text(node, path: str) -> str:
@@ -285,7 +285,7 @@ class TelegramPublic:
 
     def _parse(self, html: str) -> list[Post]:
         posts = []
-        for node in HTMLParser(html).css(".tgme_widget_message"):
+        for node in LexborHTMLParser(html).css(".tgme_widget_message"):
             slug = node.attributes.get("data-post")
             if not slug:
                 continue

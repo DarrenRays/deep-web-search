@@ -18,13 +18,49 @@ services:
       driver: json-file
       options: {max-size: "10m", max-file: "3"}
 
-  crawl4ai:
-    image: unclecode/crawl4ai:latest
-    container_name: crawl4ai
+  # A second instance with its own settings, so it can leave through a different
+  # exit than the first one: CAPTCHA budgets are per IP, and one wave on one IP
+  # no longer empties the search.
+  searxng-b:
+    image: searxng/searxng:latest
+    container_name: searxng-b
+    restart: unless-stopped
+    networks: [search-net]
+    ports:
+      - "127.0.0.1:${SEARXNG_B_PORT:-8881}:8080"
+    volumes:
+      - ./searxng-b:/etc/searxng:rw
+      - searxng-b-cache:/var/cache/searxng
+    cap_drop: [ALL]
+    cap_add: [CHOWN, SETGID, SETUID]
+    logging:
+      driver: json-file
+      options: {max-size: "10m", max-file: "3"}
+
+  # Crawl4AI cannot be given an upstream proxy: Chromium is pinned to the
+  # server's own SSRF-guarding forward proxy, which dials the target directly.
+  # So the whole network namespace goes through a tun device instead. DNS stays
+  # on Docker's embedded resolver (127.0.0.11), which does not cross the tunnel,
+  # so a SOCKS5 proxy without UDP support is enough.
+  crawl4ai-egress:
+    image: xjasonlyu/tun2socks:latest
+    container_name: crawl4ai-egress
     restart: unless-stopped
     networks: [search-net]
     ports:
       - "127.0.0.1:${CRAWL4AI_PORT:-11235}:11235"
+    environment:
+      PROXY: ${CRAWL4AI_EGRESS_PROXY:-direct://}
+      LOGLEVEL: warn
+    cap_add: [NET_ADMIN]
+    devices: ["/dev/net/tun:/dev/net/tun"]
+
+  crawl4ai:
+    image: unclecode/crawl4ai:latest
+    container_name: crawl4ai
+    restart: unless-stopped
+    network_mode: "service:crawl4ai-egress"
+    depends_on: [crawl4ai-egress]
     environment:
       CRAWL4AI_API_TOKEN: ${CRAWL4AI_API_TOKEN:?set CRAWL4AI_API_TOKEN in .env}
     # Chromium crashes on heavy pages with the default 64MB /dev/shm.
@@ -42,3 +78,4 @@ networks:
 
 volumes:
   searxng-cache:
+  searxng-b-cache:

@@ -5,8 +5,10 @@ description = "Deep search for Claude Code: Tavily+Jina and self-hosted SearXNG+
 requires-python = ">=3.12"
 dependencies = [
     "httpx>=0.28",
-    "selectolax>=0.3.21",
+    "selectolax>=1.0",
     "defusedxml>=0.7.1",
+    "trafilatura>=2.0",
+    "patchright>=1.64.1",
 ]
 
 [dependency-groups]

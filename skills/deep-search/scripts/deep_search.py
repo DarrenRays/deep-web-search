@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
-"""Deep search: Tavily+Jina and self-hosted SearXNG+Crawl4AI in parallel, merged.
+"""Deep search: two self-hosted SearXNG instances in parallel, pages read in full.
 
-Nothing reaches the model context until this skill is called. Branch A shells
-out to tavily_jina.py next to this file; branch B imports the stack's own
-modules from the checkout's lib/ instead of restating its HTTP contracts, which
+Nothing reaches the model context until this skill is called. The instances
+leave the machine through different exits, so a CAPTCHA wave on one IP does not
+empty the search. Pages are read with a plain GET and trafilatura first, and
+only the ones that need a browser go to Crawl4AI. The stack's own modules are
+imported from the checkout's lib/ instead of restating its HTTP contracts, which
 also keeps the SSRF vetting in sanitize.py on the path.
 """
 
@@ -15,20 +17,20 @@ import importlib
 import importlib.util
 import json
 import os
-import shutil
 import socket
-import subprocess
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import urlsplit
 
 BOOTSTRAP_FLAG = "DEEP_SEARCH_BOOTSTRAPPED"
-TAVILY_SCRIPT = "tavily_jina.py"
-TAVILY_TIMEOUT = 180
-TAVILY = "tavily+jina"
-SELFHOSTED = "searxng+crawl4ai"
-TAVILY_MAX_RESULTS = 20
+SEARXNG = "searxng"
+SEARXNG_B = "searxng-b"
+# Instance name -> (full URL override, port variable, default port).
+INSTANCES = {
+    SEARXNG: ("DEEP_SEARCH_SEARXNG_URL", "SEARXNG_PORT", "8880"),
+    SEARXNG_B: ("DEEP_SEARCH_SEARXNG_B_URL", "SEARXNG_B_PORT", "8881"),
+}
 PROXY_DEFAULT = "http://127.0.0.1:8118"
 # Present in the general category but not web search: dictionaries, translators,
 # currency and reverse-image lookups. They only crowd out real results.
@@ -71,7 +73,7 @@ BROWSER_RETRY_MAX = 3
 
 
 class BranchFailed(RuntimeError):
-    """One source branch is unusable. Its reason is reported, never swallowed."""
+    """One source is unusable. Its reason is reported, never swallowed."""
 
 
 @dataclass
@@ -118,11 +120,10 @@ def repo_dir() -> Path:
 
 
 def normalize_proxy_env(proxy: str) -> None:
-    """Set one proxy for this process and everything it spawns.
+    """Set one proxy for this process.
 
     A machine's own NO_PROXY can carry IPv6 entries that httpx refuses to parse
-    ("Invalid port: ':'"), so the list is replaced rather than extended. Branch A
-    runs as a subprocess on urllib and picks the same values up from here.
+    ("Invalid port: ':'"), so the list is replaced rather than extended.
     """
     for name in PROXY_ENV:
         os.environ.pop(name, None)
@@ -157,10 +158,10 @@ def setup_proxy(disabled: bool) -> str:
 
 
 def bootstrap() -> None:
-    """Re-exec under the stack's venv when this interpreter has no httpx."""
+    """Re-exec under the stack's venv when this interpreter lacks the dependencies."""
     if os.environ.get(BOOTSTRAP_FLAG):
         return
-    if importlib.util.find_spec("httpx") is not None:
+    if all(importlib.util.find_spec(name) for name in ("httpx", "trafilatura")):
         return
     venv_python = repo_dir() / ".venv/bin/python"
     if not venv_python.exists():
@@ -201,10 +202,9 @@ def _require_httpx():
     return httpx
 
 
-def _searxng_url() -> str:
-    override = os.environ.get("DEEP_SEARCH_SEARXNG_URL")
-    port = os.environ.get("SEARXNG_PORT", "8880")
-    return override or f"http://127.0.0.1:{port}"
+def _searxng_url(name: str = SEARXNG) -> str:
+    override, port_name, port = INSTANCES[name]
+    return os.environ.get(override) or f"http://127.0.0.1:{os.environ.get(port_name, port)}"
 
 
 def _crawl4ai_url() -> str:
@@ -233,92 +233,7 @@ def crawl_token() -> str:
     return token
 
 
-def _first_line(text: str) -> str:
-    for line in text.splitlines():
-        if line.strip():
-            return line.strip()[:300]
-    return ""
-
-
-def tavily_script() -> Path:
-    """Locate the Tavily+Jina script that runs branch A."""
-    path = Path(__file__).resolve().parent / TAVILY_SCRIPT
-    if not path.exists():
-        raise BranchFailed(f"скрипт ветки не найден: {path}")
-    return path
-
-
-def search_tavily(
-    query: str, *, max_results: int, full_pages: int, max_chars: int
-) -> list[Entry]:
-    script = tavily_script()
-    # Tavily refuses more than 20 results per request; pages read in full are
-    # capped by the same tier budget the self-hosted branch uses.
-    asked = max(1, min(max_results, TAVILY_MAX_RESULTS))
-    command = [
-        shutil.which("python3") or sys.executable,
-        str(script),
-        query,
-        "--max-results",
-        str(asked),
-        "--jina-pages",
-        str(max(1, min(full_pages, asked))),
-        "--max-chars",
-        str(max_chars),
-    ]
-    try:
-        done = subprocess.run(
-            command, capture_output=True, text=True, timeout=TAVILY_TIMEOUT
-        )
-    except subprocess.TimeoutExpired as exc:
-        raise BranchFailed(f"не ответил за {TAVILY_TIMEOUT} с") from exc
-    if done.returncode != 0:
-        raise BranchFailed(_first_line(done.stderr) or f"exit code {done.returncode}")
-    try:
-        payload = json.loads(done.stdout)
-    except json.JSONDecodeError as exc:
-        raise BranchFailed(f"вернул не JSON: {_first_line(done.stdout)}") from exc
-    return _entries_from_tavily(payload)
-
-
-def _entries_from_tavily(payload: dict) -> list[Entry]:
-    entries: list[Entry] = []
-    read: set[str] = set()
-
-    for page in payload.get("normalized_pages", []):
-        url = (page.get("url") or "").strip()
-        if not url:
-            continue
-        jina = page.get("jina") or {}
-        snippet = (page.get("tavily_content") or "").strip()
-        read.add(url)
-        entries.append(
-            Entry(
-                url=url,
-                title=page.get("title") or url,
-                text=(jina.get("content") or snippet).strip(),
-                snippet=snippet,
-                sources=[TAVILY],
-            )
-        )
-
-    for item in payload.get("results", []):
-        url = (item.get("url") or "").strip()
-        if not url or url in read:
-            continue
-        entries.append(
-            Entry(
-                url=url,
-                title=item.get("title") or url,
-                text="",
-                snippet=(item.get("content") or "").strip(),
-                sources=[TAVILY],
-            )
-        )
-    return entries
-
-
-async def discover_engines(client) -> tuple[list[str], str]:
+async def discover_engines(client, name: str) -> tuple[list[str], str]:
     """Every general-category engine this SearXNG has, minus the non-search utilities.
 
     Read from /config rather than hardcoded, so an image upgrade that adds or
@@ -328,7 +243,7 @@ async def discover_engines(client) -> tuple[list[str], str]:
     """
     httpx = _require_httpx()
     try:
-        response = await client.get(f"{_searxng_url()}/config", timeout=10.0)
+        response = await client.get(f"{_searxng_url(name)}/config", timeout=10.0)
         response.raise_for_status()
         catalogue = response.json().get("engines", [])
     except (httpx.HTTPError, ValueError) as exc:
@@ -348,16 +263,17 @@ async def discover_engines(client) -> tuple[list[str], str]:
     return names, ""
 
 
-async def resolve_engines(client, spec: str) -> tuple[list[str], str]:
+async def resolve_engines(client, name: str, spec: str) -> tuple[list[str], str]:
     if spec == "builtin":
         return [], ""
     if spec == "auto":
-        return await discover_engines(client)
-    return [name.strip() for name in spec.split(",") if name.strip()], ""
+        return await discover_engines(client, name)
+    return [engine.strip() for engine in spec.split(",") if engine.strip()], ""
 
 
 async def searxng_search(
     client,
+    name: str,
     query: str,
     *,
     count: int,
@@ -366,7 +282,7 @@ async def searxng_search(
     engines: list[str],
     timeout: float,
 ) -> tuple[list, list[tuple[str, str]]]:
-    """Query SearXNG directly, returning hits and the engines that did not answer.
+    """Query one SearXNG directly, returning hits and the engines that did not answer.
 
     backends.Searxng cannot cover this call: it has no `engines` parameter and
     reads only `results`, so a rate-limited pool came back as "nothing found".
@@ -386,7 +302,7 @@ async def searxng_search(
         params["engines"] = ",".join(engines)
 
     response = await client.get(
-        f"{_searxng_url()}/search", params=params, timeout=timeout
+        f"{_searxng_url(name)}/search", params=params, timeout=timeout
     )
     if response.status_code == 403:
         raise BranchFailed(
@@ -416,113 +332,183 @@ async def searxng_search(
     return hits, down
 
 
-async def search_selfhosted(
-    client,
-    query: str,
-    *,
-    max_results: int,
-    full_pages: int,
-    language: str,
-    time_range: str,
-    engines: str,
-    search_timeout: float,
-    fresh: bool,
-) -> tuple[list[Entry], list[Failure], str]:
-    backends, sanitize = _stack_modules("backends", "sanitize")
-    token = crawl_token()
-    chosen, engines_warning = await resolve_engines(client, engines)
-
+async def search_instance(client, name: str, args) -> tuple[list[Entry], str]:
+    """One SearXNG instance, as links. Raises BranchFailed when it found nothing."""
+    chosen, engines_warning = await resolve_engines(client, name, args.engines)
     hits, down = await searxng_search(
         client,
-        query,
+        name,
+        args.query,
         # Exactly max_results, not a multiple: SearXNG returns its pool in score
         # order and a wide engine set puts link-farm domains in the tail.
-        count=max_results,
-        language=language,
-        time_range=time_range,
+        count=args.max_results,
+        language=args.language,
+        time_range=args.time_range,
         engines=chosen,
-        timeout=search_timeout,
+        timeout=args.search_timeout,
     )
     asked = str(len(chosen)) if chosen else "по умолчанию"
     answered = len({hit.engine for hit in hits if hit.engine})
-    note = f"движки: запрошено {asked}, с результатами {answered}, без ответа {len(down)}"
+    note = (
+        f"движки {name}: запрошено {asked}, с результатами {answered}, "
+        f"без ответа {len(down)}"
+    )
     if engines_warning:
         note += f" ({engines_warning})"
 
     if not hits:
-        listed = ", ".join(f"{name} ({reason})" for name, reason in down)
+        listed = ", ".join(f"{engine} ({reason})" for engine, reason in down)
         detail = f"; недоступны: {listed}" if listed else ""
         raise BranchFailed(f"SearXNG вернул 0 результатов; {note}{detail}")
 
-    safe, rejected = await asyncio.to_thread(
-        sanitize.partition_safe, [hit.url for hit in hits]
-    )
-    kept = sanitize.dedupe_by_domain(safe)[:max_results]
-    failures = await asyncio.to_thread(_describe_rejects, rejected)
-    if not kept:
-        return [], failures, note
+    entries = [
+        Entry(
+            url=hit.url,
+            title=hit.title,
+            text="",
+            snippet=hit.snippet,
+            engine=hit.engine,
+            sources=[name],
+        )
+        for hit in hits
+    ]
+    return entries, note
 
-    by_url = {hit.url: hit for hit in hits}
-    crawler = backends.Crawl4ai(_crawl4ai_url(), token, client)
+
+async def read_pages(
+    client, entries: list[Entry], *, full_pages: int, fresh: bool, browser: bool
+) -> tuple[list[Entry], list[Failure]]:
+    """Read the first full_pages entries in full; the rest stay as links.
+
+    A page that no reader could open is dropped from the entries and named in
+    the failures instead.
+    """
+    (backends,) = _stack_modules("backends")
+    httpx = _require_httpx()
+    # The process client carries the proxy. A second one without it lets the
+    # reader try .ru-zone sites direct first, as the browser step does.
+    direct = httpx.AsyncClient(trust_env=False) if os.environ.get("HTTPS_PROXY") else None
+    try:
+        return await _read_pages(
+            backends.Reader(client, direct), backends, client, entries,
+            full_pages=full_pages, fresh=fresh, browser=browser,
+        )
+    finally:
+        if direct is not None:
+            await direct.aclose()
+
+
+async def _read_pages(
+    reader, backends, client, entries: list[Entry], *, full_pages: int, fresh: bool, browser: bool
+) -> tuple[list[Entry], list[Failure]]:
+    try:
+        crawler = backends.Crawl4ai(_crawl4ai_url(), crawl_token(), client)
+        crawler_problem = ""
+    except BranchFailed as exc:
+        crawler, crawler_problem = None, str(exc)
     cache_mode = "bypass" if fresh else "enabled"
 
-    entries, crawl_failures = await _crawl_batch(
-        crawler, kept[:full_pages], by_url, cache_mode
-    )
-    failures.extend(crawl_failures)
-    spare = kept[full_pages:]
+    wanted, spare = entries[:full_pages], entries[full_pages:]
+    failures = await _read_batch(reader, crawler, crawler_problem, wanted, cache_mode)
 
     # Cloudflare challenges and empty pages are common enough that asking for ten
     # full reads and settling for seven wastes the tier. One backfill round only.
-    shortfall = full_pages - len(entries)
+    shortfall = full_pages - sum(1 for entry in wanted if entry.text)
     if shortfall > 0 and spare:
         extra, spare = spare[:shortfall], spare[shortfall:]
-        more, more_failures = await _crawl_batch(crawler, extra, by_url, cache_mode)
-        entries.extend(more)
-        failures.extend(more_failures)
-
-    # The rest stay as links with the engine's own snippet: a map of what else
-    # exists, cheap enough to keep dozens of them in the report.
-    for url in spare:
-        hit = by_url[url]
-        entries.append(
-            Entry(
-                url=url,
-                title=hit.title,
-                text="",
-                snippet=hit.snippet,
-                engine=hit.engine,
-                sources=[SELFHOSTED],
-            )
+        failures.extend(
+            await _read_batch(reader, crawler, crawler_problem, extra, cache_mode)
         )
-    return entries, failures, note
+        wanted += extra
+
+    if browser:
+        failures = await _browser_pass(wanted, failures)
+
+    failed = {failure.source for failure in failures}
+    kept = [entry for entry in wanted if entry.url not in failed] + spare
+    return kept, failures
 
 
-async def _crawl_batch(
-    crawler, urls: list[str], by_url: dict, cache_mode: str
-) -> tuple[list[Entry], list[Failure]]:
-    if not urls:
-        return [], []
-    entries: list[Entry] = []
-    failures: list[Failure] = []
-    for page in await crawler.crawl(urls, cache_mode=cache_mode):
+async def _browser_pass(wanted: list[Entry], failures: list[Failure]) -> list[Failure]:
+    """Reopen the pages the readers were refused in a real browser.
+
+    A page the browser read leaves the failures. One the browser was refused too
+    stays, no longer offered for a browser retry. When no browser can start, the
+    candidates stay retryable, so the model can still try its own.
+    """
+    candidates = browser_candidates(failures)
+    if not candidates:
+        return failures
+    (browser,) = _stack_modules("browser")
+    try:
+        pages = await browser.read(
+            [failure.source for failure in candidates], os.environ.get("HTTPS_PROXY", "")
+        )
+    except browser.BrowserUnavailable as exc:
+        return [*failures, Failure("браузер", str(exc))]
+
+    by_url = {entry.url: entry for entry in wanted}
+    done: set[str] = set()
+    for failure, page in zip(candidates, pages, strict=True):
         if page.error:
-            failures.append(
-                Failure(page.url, page.error, retryable=browser_can_retry(page.error))
-            )
+            failure.reason = f"{failure.reason}; браузер — {page.error}"
+            failure.retryable = False
             continue
-        hit = by_url.get(page.url)
-        entries.append(
-            Entry(
-                url=page.url,
-                title=page.title or (hit.title if hit else page.url),
-                text=page.markdown.strip(),
-                snippet=hit.snippet if hit else "",
-                engine=hit.engine if hit else "",
-                sources=[SELFHOSTED],
-            )
-        )
-    return entries, failures
+        entry = by_url[failure.source]
+        entry.text = page.markdown
+        entry.title = page.title or entry.title
+        entry.engine = " · ".join(part for part in (entry.engine, "браузер") if part)
+        done.add(failure.source)
+    return [failure for failure in failures if failure.source not in done]
+
+
+async def _read_batch(
+    reader, crawler, crawler_problem: str, batch: list[Entry], cache_mode: str
+) -> list[Failure]:
+    """trafilatura first; what it could not read goes to Crawl4AI in one call."""
+    if not batch:
+        return []
+    missed: list[tuple[Entry, str]] = []
+    for entry, page in zip(batch, await reader.read([e.url for e in batch]), strict=True):
+        if page.error:
+            missed.append((entry, page.error))
+            continue
+        entry.text = page.markdown
+        entry.title = page.title or entry.title
+    if not missed:
+        return []
+
+    (backends,) = _stack_modules("backends")
+    urls = [entry.url for entry, _ in missed]
+    problem = crawler_problem
+    crawled = []
+    if crawler is not None:
+        httpx = _require_httpx()
+        try:
+            crawled = await crawler.crawl(urls, cache_mode=cache_mode)
+        except httpx.HTTPError as exc:
+            problem = f"Crawl4AI недоступен: {type(exc).__name__}"
+    if problem:
+        crawled = [
+            backends.PageResult(url=url, title="", markdown="", error=problem)
+            for url in urls
+        ]
+
+    failures: list[Failure] = []
+    for (entry, first_error), page in zip(missed, crawled, strict=True):
+        if page.error:
+            reason = f"{page.error} (trafilatura: {first_error})"
+            # The address passed the SSRF check and the host answered or timed
+            # out, so a real browser is worth a try whatever the readers said —
+            # proxy errors and DPI stalls included. A file that is not HTML is
+            # the one case a browser does not change.
+            retryable = not first_error.startswith("не HTML")
+            failures.append(Failure(entry.url, reason, retryable=retryable))
+            continue
+        entry.text = page.markdown.strip()
+        if page.title and page.title != entry.url:
+            entry.title = page.title
+    return failures
 
 
 def _describe_rejects(rejected: list[tuple[str, str]]) -> list[Failure]:
@@ -553,76 +539,101 @@ def _describe_rejects(rejected: list[tuple[str, str]]) -> list[Failure]:
 
 
 async def search_social(
-    client, query: str, *, limit: int, per_platform: int, max_chars: int
+    client, name: str, query: str, *, limit: int, per_platform: int, max_chars: int
 ) -> str:
     backends, sources, aggregate, social = _stack_modules(
         "backends", "sources", "aggregate", "social"
     )
-    searxng = backends.Searxng(_searxng_url(), client)
+    searxng = backends.Searxng(_searxng_url(name), client)
     chosen = aggregate.select(sources.build_sources(client, searxng), None)
     spec = social.QuerySpec(terms=query, limit=per_platform)
     per_source, failures, took = await aggregate.gather(chosen, spec, None)
     posts = social.merge(per_source, sort="relevance", limit=limit)
     stats = {
-        name: f"{len(found)} ({took[name]} ms)" for name, found in per_source.items()
+        source: f"{len(found)} ({took[source]} ms)" for source, found in per_source.items()
     }
     return social.render(posts, failures, stats, max_chars_per_post=max_chars)
 
 
-async def selfhosted_branch(
-    args,
-) -> tuple[list[Entry], list[Failure], str, str]:
+@dataclass
+class Research:
+    entries: list[Entry]
+    failures: list[Failure]
+    stats: list[str]
+    engines_note: str
+    social_block: str
+
+
+class NothingFound(RuntimeError):
+    """Every SearXNG instance failed; the failures say why."""
+
+    def __init__(self, failures: list[Failure]) -> None:
+        super().__init__("all sources failed")
+        self.failures = failures
+
+
+async def research(args) -> Research:
     httpx = _require_httpx()
+    sanitize, social = _stack_modules("sanitize", "social")
+    names = [name for name in INSTANCES if args.only in ("", name)]
     # Proxy comes from the env normalize_proxy_env() has already rewritten, which
-    # keeps 127.0.0.1 (SearXNG, Crawl4AI) direct and sends external hosts through.
+    # keeps 127.0.0.1 (SearXNG, Crawl4AI) direct and sends page reads through.
     async with httpx.AsyncClient(follow_redirects=True) as client:
-        entries, failures, engines_note = await search_selfhosted(
-            client,
-            args.query,
-            max_results=args.max_results,
-            full_pages=args.full_pages,
-            language=args.language,
-            time_range=args.time_range,
-            engines=args.engines,
-            search_timeout=args.search_timeout,
-            fresh=args.fresh,
+        outcomes = await asyncio.gather(
+            *(search_instance(client, name, args) for name in names),
+            return_exceptions=True,
         )
+        groups: list[list[Entry]] = []
+        failures: list[Failure] = []
+        stats: list[str] = []
+        notes: list[str] = []
+        for name, outcome in zip(names, outcomes, strict=True):
+            if isinstance(outcome, BaseException):
+                failures.append(Failure(name, _reason(outcome)))
+                continue
+            entries, note = outcome
+            groups.append(entries)
+            notes.append(note)
+            stats.append(f"{name}: {len(entries)}")
+        if not groups:
+            raise NothingFound(failures)
+
+        # Found by both instances first: those are the ones worth reading.
+        merged = merge(groups, social.canonical_url)
+        safe, rejected = await asyncio.to_thread(
+            sanitize.partition_safe, [entry.url for entry in merged]
+        )
+        failures.extend(await asyncio.to_thread(_describe_rejects, rejected))
+        allowed = set(sanitize.dedupe_by_domain(safe))
+        merged = [entry for entry in merged if entry.url in allowed]
+
+        entries, page_failures = await read_pages(
+            client,
+            merged,
+            full_pages=args.full_pages,
+            fresh=args.fresh,
+            browser=not args.no_browser,
+        )
+        failures.extend(page_failures)
+
         social_block = ""
         if args.social:
             social_block = await search_social(
                 client,
+                names[0],
                 args.query,
                 limit=args.social_limit,
                 per_platform=args.social_per_platform,
                 max_chars=args.social_chars,
             )
-    return entries, failures, social_block, engines_note
 
-
-def make_canonicalizer():
-    """Stack's canonical_url when reachable; branch A must work without the repo."""
-    try:
-        (social,) = _stack_modules("social")
-    except BranchFailed:
-        return lambda url: url.strip().rstrip("/").lower()
-    return social.canonical_url
-
-
-def make_truncate():
-    try:
-        (sanitize,) = _stack_modules("sanitize")
-    except BranchFailed:
-
-        def cut(text: str, limit: int) -> str:
-            if limit <= 0 or len(text) <= limit:
-                return text
-            return (
-                text[:limit].rstrip()
-                + f"\n\n…[truncated, {len(text) - limit} chars omitted]"
-            )
-
-        return cut
-    return sanitize.truncate
+    # Full reads first again: the backfill may have read entries further down.
+    entries.sort(key=lambda entry: 0 if entry.text else 1)
+    both = sum(1 for entry in entries if len(entry.sources) > 1)
+    if both:
+        stats.append(f"совпадений: {both}")
+    stats.append(f"прочитано полностью: {sum(1 for entry in entries if entry.text)}")
+    return Research(entries, failures, stats, "\n".join(notes), social_block)
 
 
 def merge(groups: list[list[Entry]], canonicalize) -> list[Entry]:
@@ -724,87 +735,46 @@ def render(
 
 
 async def run(args) -> tuple[str, int]:
-    names: list[str] = []
-    branches = []
-    if args.only != "searxng":
-        names.append(TAVILY)
-        branches.append(
-            asyncio.to_thread(
-                search_tavily,
-                args.query,
-                max_results=args.max_results,
-                full_pages=args.full_pages,
-                max_chars=args.max_chars_per_page,
-            )
-        )
-    if args.only != "tavily":
-        names.append(SELFHOSTED)
-        branches.append(selfhosted_branch(args))
-
-    outcomes = await asyncio.gather(*branches, return_exceptions=True)
-
-    groups: list[list[Entry]] = []
-    failures: list[Failure] = []
-    stats: list[str] = []
-    social_block = ""
-    engines_note = ""
-    alive = 0
-
-    for name, outcome in zip(names, outcomes, strict=True):
-        if isinstance(outcome, BaseException):
-            failures.append(Failure(name, _reason(outcome)))
-            continue
-        alive += 1
-        if name == TAVILY:
-            entries = outcome
-        else:
-            entries, page_failures, social_block, engines_note = outcome
-            failures.extend(page_failures)
-        groups.append(entries)
-        stats.append(f"{name}: {len(entries)}")
-
-    if not alive:
-        listed = "\n".join(f"{f.source}: {f.reason}" for f in failures)
+    try:
+        found = await research(args)
+    except NothingFound as exc:
+        listed = "\n".join(f"{f.source}: {f.reason}" for f in exc.failures)
         return f"{listed}\nпрокси: {args.proxy_note}", 3
-
-    merged = merge(groups, make_canonicalizer())
-    both = sum(1 for entry in merged if len(entry.sources) > 1)
-    if both:
-        stats.append(f"совпадений: {both}")
-    read_fully = sum(1 for entry in merged if entry.text)
-    stats.append(f"прочитано полностью: {read_fully}")
+    except BranchFailed as exc:
+        return f"deep-search: {exc}\nпрокси: {args.proxy_note}", 3
 
     if args.json:
         payload = {
             "query": args.query,
             "proxy": args.proxy_note,
-            "engines": engines_note,
-            "entries": [vars(entry) for entry in merged],
+            "engines": found.engines_note,
+            "entries": [vars(entry) for entry in found.entries],
             "failures": [
-                {"source": f.source, "reason": f.reason} for f in failures
+                {"source": f.source, "reason": f.reason} for f in found.failures
             ],
             "blocked": [
                 {"url": f.source, "reason": f.reason}
-                for f in browser_candidates(failures)
+                for f in browser_candidates(found.failures)
             ],
-            "social": social_block,
+            "social": found.social_block,
         }
         return json.dumps(payload, ensure_ascii=False, indent=2), 0
 
+    (sanitize,) = _stack_modules("sanitize")
     output = render(
         args.query,
-        merged,
-        failures,
-        stats,
+        found.entries,
+        found.failures,
+        found.stats,
         max_chars_per_page=args.max_chars_per_page,
         total_budget=args.total_budget,
-        truncate=make_truncate(),
+        truncate=sanitize.truncate,
         proxy_note=args.proxy_note,
-        engines_note=engines_note,
+        engines_note=found.engines_note,
         snippet_chars=args.snippet_chars,
     )
-    if social_block:
-        output += f"\n\n## Социальные сети\n\n{social_block}"
+    if found.social_block:
+        output += f"\n\n## Социальные сети\n\n{found.social_block}"
     return output, 0
 
 
@@ -816,14 +786,14 @@ def _reason(error: BaseException) -> str:
 
 def parse_args(argv: list[str] | None = None):
     parser = argparse.ArgumentParser(
-        description="Tavily+Jina и self-hosted SearXNG+Crawl4AI параллельно, один отчёт."
+        description="Два self-hosted SearXNG параллельно, страницы через trafilatura и Crawl4AI."
     )
     parser.add_argument("query", help="Поисковый запрос")
     parser.add_argument(
         "--max-results",
         type=int,
         default=50,
-        help="Всего источников в отчёте с каждой ветки (полные + ссылки)",
+        help="Сколько ссылок брать с каждого SearXNG",
     )
     parser.add_argument(
         "--full-pages",
@@ -854,8 +824,13 @@ def parse_args(argv: list[str] | None = None):
     parser.add_argument(
         "--time-range", default="", choices=["", "day", "week", "month", "year"]
     )
-    parser.add_argument("--only", choices=["tavily", "searxng"], default="")
+    parser.add_argument("--only", choices=list(INSTANCES), default="")
     parser.add_argument("--fresh", action="store_true", help="Обойти кэш Crawl4AI")
+    parser.add_argument(
+        "--no-browser",
+        action="store_true",
+        help="Не открывать заблокированные страницы в Chrome",
+    )
     parser.add_argument("--social", action="store_true", help="Добавить блок social_search")
     parser.add_argument("--social-limit", type=int, default=20)
     parser.add_argument("--social-per-platform", type=int, default=8)
